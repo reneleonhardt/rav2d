@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import artifacts
+import matrix
 from smoke import y4m_hash
 
 
@@ -31,6 +32,7 @@ class ArtifactTests(unittest.TestCase):
             output = root / "artifacts"
             for name in ("target/aarch64-unknown-linux-gnu/release/rav2d",
                          "dav2d/build/tests/checkasm", "dav2d/build/src/libdav2d.so.0",
+                         "dav2d/build/subprojects/checkasm/src/libcheckasm.so",
                          "loader.so", "unit", "conformance", "fuzz"):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,13 +46,16 @@ class ArtifactTests(unittest.TestCase):
                               "profile": {"test": True}, "executable": str(root / executable)})
             messages.write_text("\n".join(map(json.dumps, items)))
             dependencies = f"libdav2d.so.0 => {root}/dav2d/build/src/libdav2d.so.0 (0x1)\n{root}/loader.so (0x2)"
+            dependencies += f"\nlibcheckasm.so => {root}/dav2d/build/subprojects/checkasm/src/libcheckasm.so (0x3)"
             with patch.object(artifacts, "ROOT", root), patch.object(artifacts, "ARTIFACTS", output), \
                  patch.object(artifacts.subprocess, "check_output", return_value=dependencies) as ldd:
                 artifacts.pack(messages, "aarch64-unknown-linux-gnu")
                 self.assertEqual(ldd.call_count, 5)
+                ldd.assert_any_call(["ldd", str(root / "dav2d/build/tests/checkasm")], text=True)
                 for source, destination in [("unit", "unit-tests"), ("conformance", "conformance-tests"),
                                             ("fuzz", "fuzz-tests"), ("loader.so", "sysroot" + str(root / "loader.so")),
-                                            ("dav2d/build/src/libdav2d.so.0", "lib/libdav2d.so.0")]:
+                                            ("dav2d/build/src/libdav2d.so.0", "lib/libdav2d.so.0"),
+                                            ("dav2d/build/subprojects/checkasm/src/libcheckasm.so", "lib/libcheckasm.so")]:
                     self.assertEqual((root / source).read_bytes(), (output / destination).read_bytes())
                     self.assertTrue((output / destination).stat().st_mode & 0o111)
                 messages.write_text(json.dumps(items[0]))
@@ -99,11 +104,20 @@ class ArtifactTests(unittest.TestCase):
             with patch.object(artifacts, "ARTIFACTS", root), patch.dict(artifacts.os.environ), \
                  patch.object(artifacts.subprocess, "run", side_effect=results) as run, \
                  patch.object(artifacts, "smoke") as smoke, redirect_stdout(io.StringIO()):
-                artifacts.run("qemu-aarch64")
+                artifacts.run("sde64 -icl-server --")
                 self.assertEqual(len(run.call_args_list), 5)
                 for call in run.call_args_list:
-                    self.assertIn("qemu-aarch64", call.args[0])
-                smoke.assert_called_once_with(root / "rav2d", "qemu-aarch64")
+                    self.assertEqual(call.args[0][3:6], ["sde64", "-icl-server", "--"])
+                smoke.assert_called_once_with(root / "rav2d", "sde64 -icl-server --")
+
+    def test_cpu_matrix_matches_emulator_capabilities(self):
+        cpus = matrix.matrix(True)["include"]
+        self.assertEqual(len(cpus), 36)
+        for cpu in cpus:
+            with self.subTest(cpu=cpu["cpu"]):
+                if cpu["arch"] == "amd64":
+                    self.assertEqual(bool(cpu["flags"] & 16), bool(cpu["sde"]))
+                    self.assertEqual(cpu["emulator"].startswith("sde64 "), bool(cpu["sde"]))
 
 
 if __name__ == "__main__":

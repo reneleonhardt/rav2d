@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 
@@ -39,7 +40,7 @@ def smoke(binary, emulator=None):
     expected = Path(str(clip) + ".md5").read_text().strip()
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "decoded.y4m"
-        prefix = [emulator] if emulator else []
+        prefix = shlex.split(emulator) if emulator else []
         subprocess.run(command(prefix + [str(Path(binary).resolve()), str(clip), "-t", "1", "-o", str(output)]), check=True, timeout=180,
                        creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0)
         with output.open("rb") as stream:

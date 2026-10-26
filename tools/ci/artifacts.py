@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 
@@ -17,6 +18,7 @@ def pack(messages, target):
     ARTIFACTS.mkdir(exist_ok=True)
     names = {"rav2d": "unit-tests", "conformance": "conformance-tests", "fuzz": "fuzz-tests"}
     found = set()
+    binaries = []
     for line in Path(messages).read_text().splitlines():
         item = json.loads(line)
         if item.get("reason") != "compiler-artifact" or not item.get("executable"):
@@ -25,10 +27,12 @@ def pack(messages, target):
         if item["profile"]["test"] and name in names:
             shutil.copy2(item["executable"], ARTIFACTS / names[name])
             found.add(name)
+            binaries.append(Path(item["executable"]))
     assert found == names.keys(), (found, names.keys())
     release = ROOT / "target" / target / "release" if target else ROOT / "target/release"
     shutil.copy2(release / "rav2d", ARTIFACTS / "rav2d")
     shutil.copy2(ROOT / "dav2d/build/tests/checkasm", ARTIFACTS / "checkasm")
+    binaries += [release / "rav2d", ROOT / "dav2d/build/tests/checkasm"]
     library = ARTIFACTS / "lib"
     library.mkdir(exist_ok=True)
     for path in (ROOT / "dav2d/build/src").glob("libdav2d.so*"):
@@ -38,7 +42,8 @@ def pack(messages, target):
     # Copy the build host's loader and libc.
     # Newer runner versions can require CPU features that older models lack.
     sysroot = ARTIFACTS / "sysroot"
-    for binary in [ARTIFACTS / name for name in names.values()] + [ARTIFACTS / "rav2d", ARTIFACTS / "checkasm"]:
+    # Inspect original executables so relative library paths still work.
+    for binary in binaries:
         output = subprocess.check_output(["ldd", str(binary)], text=True)
         for name in re.findall(r"(/[^\s]+)", output):
             path = Path(name)
@@ -53,7 +58,7 @@ def pack(messages, target):
 def run(emulator):
     os.environ["LD_LIBRARY_PATH"] = str(ARTIFACTS / "lib")
     os.environ["QEMU_LD_PREFIX"] = str(ARTIFACTS / "sysroot")
-    prefix = [emulator] if emulator else []
+    prefix = shlex.split(emulator) if emulator else []
     binary = ARTIFACTS / "checkasm"
     binary.chmod(0o755)
     result = subprocess.run(command(prefix + [str(binary), "-v"]),

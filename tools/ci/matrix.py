@@ -44,6 +44,10 @@ ARM64 = [
     ("dotprod", "cortex-a55", 3),
     ("i8mm", "max,sve=off", 7),
 ]
+SDE = {
+    "Skylake-Server": "skx", "Cascadelake-Server": "clx", "Cooperlake": "cpx",
+    "Icelake-Server": "icl-server", "SapphireRapids": "spr", "GraniteRapids": "gnr",
+}
 
 
 def matrix(extended):
@@ -52,9 +56,15 @@ def matrix(extended):
     result = []
     for arch, cpus in (("amd64", selected), ("arm64", ARM64)):
         for name, cpu, flags in cpus:
+            sde = SDE.get(cpu, "") if arch == "amd64" else ""
+            # QEMU lacks AVX-512. AMD models test its AVX2 fallback; SDE covers AVX-512.
+            if arch == "amd64" and not sde:
+                flags &= 15
             result.append({"name": name, "cpu": cpu, "flags": flags, "arch": arch,
+                           "sde": sde,
                            "runner": "ubuntu-26.04" if arch == "amd64" else "ubuntu-26.04-arm",
-                           "emulator": "qemu-x86_64" if arch == "amd64" else "qemu-aarch64"})
+                           "emulator": f"sde64 -{sde} --" if sde else
+                           "qemu-x86_64" if arch == "amd64" else "qemu-aarch64"})
     return {"include": result}
 
 

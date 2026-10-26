@@ -38,7 +38,11 @@ jobs:
         with:
           name: portable-${{ matrix.arch }}
           path: ci-artifacts
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - if: ${{ !matrix.sde }}
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - name: Install Intel SDE for AVX-512
+        if: matrix.sde
+        run: bash tools/ci/install-sde.sh
       - name: Test identical portable artifacts
         run: python3 tools/ci/artifacts.py --run --emulator '${{ matrix.emulator }}'
 
@@ -54,9 +58,13 @@ jobs:
           - cpu: Haswell
             rust_cpu: haswell
             flags: 15
+            sde: ''
+            emulator: qemu-x86_64
           - cpu: Icelake-Server
             rust_cpu: icelake-server
             flags: 31
+            sde: icl-server
+            emulator: sde64 -icl-server --
     env:
       RUSTFLAGS: -Ctarget-cpu=${{ matrix.rust_cpu }}
       QEMU_CPU: ${{ matrix.cpu }}
@@ -68,6 +76,9 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm libclang-dev qemu-user
+      - name: Install Intel SDE for AVX-512
+        if: matrix.sde
+        run: bash tools/ci/install-sde.sh
       - name: Build optimized test artifacts
         run: |
           nice -n 10 meson setup dav2d/build dav2d --default-library=both -Denable_tests=true -Dtrim_dsp=false
@@ -75,4 +86,4 @@ jobs:
           nice -n 10 cargo build --locked --release -p rav2d-cli --target x86_64-unknown-linux-gnu
           nice -n 10 cargo test --locked --release -p rav2d --lib --test conformance --test fuzz --target x86_64-unknown-linux-gnu --no-run --message-format=json > target/test-artifacts.json
           python3 tools/ci/artifacts.py --pack target/test-artifacts.json --target x86_64-unknown-linux-gnu
-      - run: python3 tools/ci/artifacts.py --run --emulator qemu-x86_64
+      - run: python3 tools/ci/artifacts.py --run --emulator '${{ matrix.emulator }}'

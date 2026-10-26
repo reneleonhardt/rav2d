@@ -187,7 +187,10 @@ A separate Linux musl job builds without the C submodule.
 The release CLI must produce the same displayed samples as the independent avmdec reference hash.
 Rust 1.85 remains a required production build.
 
-CPU jobs run identical release binaries under separate QEMU CPU models.
+CPU jobs run identical release binaries under separate CPU models.
+QEMU tests older x86 CPUs and ARM CPUs. Intel SDE tests Intel AVX-512 models.
+QEMU cannot emulate AVX-512, so AMD Zen 4/5 jobs test their AVX2 fallback.
+These emulators do not replace tests on physical CPUs.
 PRs cover representative x86 models and ARM NEON, dotprod and i8mm.
 Scheduled runs expand this to 33 x86 models and three ARM models.
 Separate optimized builds test AVX2 and AVX-512 code generation.
