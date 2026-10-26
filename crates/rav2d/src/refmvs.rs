@@ -521,15 +521,15 @@ pub fn tip_projection(
             let mut x = sx;
             while x < xend {
                 let pos = (pos_base + x as isize) as usize;
+                let r = rp_proj[pos].r#ref;
+                rp_proj[pos].r#ref = tip_delta as u8;
                 let mv_y = unsafe { rp_proj[pos].mv.c.y };
                 if mv_y == INVALID_MV {
                     x += tmvp_sample_step;
                     continue;
                 }
                 let mv = rp_proj[pos].mv;
-                let r = rp_proj[pos].r#ref;
                 rp_proj[pos].mv = mv_projection(mv, tip_delta as i32, r as i32, -2047, 2047);
-                rp_proj[pos].r#ref = tip_delta as u8;
                 x += tmvp_sample_step;
             }
             y += tmvp_sample_step;
@@ -4150,16 +4150,22 @@ mod tests {
         let mut rp = vec![invalid_sngl(); 64];
         rp[0] = make_sngl_mv_block(100, 200, 1);
         tip_projection(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
-        let mv_y = unsafe { rp[0].mv.c.y };
-        assert_ne!(mv_y, INVALID_MV);
+        assert_eq!(unsafe { (rp[0].mv.c.y, rp[0].mv.c.x) }, (200, 400));
+        assert_eq!(rp[0].r#ref, 2);
     }
 
     #[test]
     fn test_tip_projection_skips_invalid() {
         let stride: isize = 8;
-        let mut rp = vec![invalid_sngl(); 64];
-        tip_projection(&mut rp, stride, 0, 8, 0, 8, 8, 8, 2, 2);
-        assert_eq!(unsafe { rp[0].mv.c.y }, INVALID_MV);
+        for step in [1, 2] {
+            let mut rp = vec![make_sngl_mv_block(INVALID_MV, 0, 5); 64];
+            tip_projection(&mut rp, stride, 0, 8, 0, 8, 8, 8, step, 2);
+            for (i, block) in rp.iter().enumerate() {
+                assert_eq!(unsafe { block.mv.c.y }, INVALID_MV);
+                let sampled = (i / 8) % step as usize == 0 && (i % 8) % step as usize == 0;
+                assert_eq!(block.r#ref, if sampled { 2 } else { 5 });
+            }
+        }
     }
 
     #[test]
@@ -4832,6 +4838,58 @@ mod tests {
                         if cleared { (INVALID_MV, 0) } else { (31, -47) }
                     );
                     assert_eq!(block.r#ref, 3);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_temporal_candidates_validate_both_references() {
+        let mut rf = make_default_frame();
+        rf.pocdiff[0] = 1;
+        rf.pocdiff[1] = 2;
+        for (first, second, projected, expected) in [
+            (true, false, false, None),
+            (false, true, false, None),
+            (true, false, true, Some([(12, -18), (8, -12)])),
+            (false, true, true, Some([(4, -6), (12, -18)])),
+            (true, true, false, Some([(12, -18), (12, -18)])),
+        ] {
+            let mut trajectories: [Vec<Mv>; 7] = std::array::from_fn(|_| vec![invalid_sngl().mv]);
+            for (index, present) in [first, second].into_iter().enumerate() {
+                if present {
+                    trajectories[index][0] = Mv {
+                        c: MvXY { y: 12, x: -18 },
+                    };
+                }
+            }
+            let projected = if projected {
+                make_sngl_mv_block(8, -12, 2)
+            } else {
+                invalid_sngl()
+            };
+            let mut state = MvSearchState::default();
+            let mut stack = [Candidate::default(); 6];
+            let mut count = 0;
+            let added = add_temporal_candidate(
+                &rf,
+                &[invalid_sngl(), projected],
+                1,
+                &trajectories,
+                &mut state,
+                &mut stack,
+                &mut count,
+                0,
+                RefPair { r: [0, 1] },
+                true,
+            );
+            assert_eq!(
+                (added, count),
+                (expected.is_some(), i32::from(expected.is_some()))
+            );
+            if let Some(expected) = expected {
+                for (mv, expected) in stack[0].mv.iter().zip(expected) {
+                    assert_eq!(unsafe { (mv.c.y, mv.c.x) }, expected);
                 }
             }
         }
