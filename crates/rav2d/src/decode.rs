@@ -9724,8 +9724,8 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     // sampling position advances by fractional steps (recon_tmpl.c:1611).
     if svc[0].scale != 0 || svc[1].scale != 0 {
         inter_mc_plane_scaled(
-            bd, dst, dst_stride, ref_pic, pl, bx, by, bw4, bh4, mvx, mvy, filter, ss_hor, ss_ver,
-            svc,
+            bd, dst, None, dst_stride, ref_pic, pl, bx, by, bw4, bh4, mvx, mvy, filter, ss_hor,
+            ss_ver, svc,
         );
         return;
     }
@@ -9859,14 +9859,16 @@ fn inter_mc_plane_8bpc<BD: crate::pixel::BitDepth>(
     }
 }
 
-/// Scaled-reference motion compensation for one plane (put path). Port of the
+/// Scaled-reference motion compensation for one plane. Port of the
 /// `refp != &f->cur` branch of dav2d's `mc()` (recon_tmpl.c:1611-1670): computes
 /// the scaled source window, emulates the edge into a scratch buffer when it
 /// overhangs the reference, then runs the fractional-step 8-tap kernel.
+/// `tmp` selects intermediate output for compound prediction.
 #[allow(clippy::too_many_arguments)]
 fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
     bd: BD,
     dst: &mut [BD::Pixel],
+    tmp: Option<&mut [i16]>,
     dst_stride: usize,
     ref_pic: &crate::picture::Picture,
     pl: usize,
@@ -9959,6 +9961,41 @@ fn inter_mc_plane_scaled<BD: crate::pixel::BitDepth>(
         (ref_data, off, ref_stride)
     };
 
+    if let Some(tmp) = tmp {
+        if filter == 3 {
+            crate::mc::prep_bilin_scaled(
+                bd,
+                tmp,
+                dst_stride,
+                src,
+                src_off,
+                src_stride as isize,
+                w,
+                h,
+                pos_x & 0x3ff,
+                pos_y & 0x3ff,
+                step_x,
+                step_y,
+            );
+            return;
+        }
+        crate::mc::prep_8tap_scaled(
+            bd,
+            tmp,
+            dst_stride,
+            src,
+            src_off,
+            src_stride as isize,
+            w,
+            h,
+            pos_x & 0x3ff,
+            pos_y & 0x3ff,
+            step_x,
+            step_y,
+            filter_type,
+        );
+        return;
+    }
     crate::mc::put_8tap_scaled(
         bd,
         dst,
@@ -9998,11 +10035,33 @@ fn inter_mc_plane_prep_8bpc<BD: crate::pixel::BitDepth>(
     ss_ver: i32,
     cur_bw: i32,
     cur_bh: i32,
+    svc: [ScalableMotionParams; 2],
 ) {
     let plss_ver = if pl != 0 { ss_ver } else { 0 };
     let plss_hor = if pl != 0 { ss_hor } else { 0 };
     let h_mul = 4 >> plss_hor;
     let v_mul = 4 >> plss_ver;
+    if svc[0].scale != 0 || svc[1].scale != 0 {
+        inter_mc_plane_scaled(
+            bd,
+            &mut [],
+            Some(tmp),
+            (bw4 * h_mul) as usize,
+            ref_pic,
+            pl,
+            bx,
+            by,
+            bw4,
+            bh4,
+            mvx,
+            mvy,
+            filter,
+            ss_hor,
+            ss_ver,
+            svc,
+        );
+        return;
+    }
     let ref_stride =
         ref_pic.stride[(pl != 0) as usize].unsigned_abs() / std::mem::size_of::<BD::Pixel>();
     // An unscaled reference has the current frame's size, so it holds decoded
@@ -12076,6 +12135,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                         ss_ver,
                         fi.bw,
                         fi.bh,
+                        recon.svc[refs[i] as usize],
                     );
                 }
             }
@@ -12401,6 +12461,7 @@ fn recon_b_inter_compound<BD: crate::pixel::BitDepth>(
                             ss_ver,
                             fi.bw,
                             fi.bh,
+                            recon.svc[refs[i] as usize],
                         );
                     }
                 }
@@ -18699,6 +18760,72 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaled_compound_prediction_uses_reference_dimensions() {
+        fn check<BD: crate::pixel::BitDepth>(bd: BD) {
+            let pic = crate::picture::Picture::alloc(
+                32,
+                16,
+                crate::headers::PixelLayout::I420,
+                bd.bitdepth() as i32,
+                None,
+                None,
+                std::sync::Arc::new(crate::picture::DefaultPicAllocator::new()),
+            )
+            .unwrap();
+            for pl in 0..3 {
+                let stride =
+                    pic.stride[(pl != 0) as usize] as usize / std::mem::size_of::<BD::Pixel>();
+                // SAFETY: this new picture owns each padded plane.
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        pic.data[pl].unwrap().as_ptr() as *mut BD::Pixel,
+                        stride * ref_plane_rows(&pic, pl),
+                    )
+                    .fill(bd.pixel_clip(73));
+                }
+                for filter in 0..4 {
+                    let mut tmp = [i16::MIN; 64];
+                    inter_mc_plane_prep_8bpc(
+                        bd,
+                        &mut tmp,
+                        &pic,
+                        pl,
+                        12,
+                        12,
+                        2,
+                        2,
+                        -7,
+                        3,
+                        filter,
+                        1,
+                        1,
+                        16,
+                        16,
+                        [
+                            ScalableMotionParams {
+                                scale: 8192,
+                                step: 512,
+                            },
+                            ScalableMotionParams {
+                                scale: 4096,
+                                step: 256,
+                            },
+                        ],
+                    );
+                    let size = if pl == 0 { 64 } else { 16 };
+                    let expected = (73 << crate::mc::intermediate_bits(bd))
+                        - if BD::BPC == 8 { 0 } else { 8192 };
+                    assert!(tmp[..size].iter().all(|&v| v == expected as i16));
+                    assert!(tmp[size..].iter().all(|&v| v == i16::MIN));
+                }
+            }
+        }
+        check(crate::pixel::BitDepth8);
+        check(crate::pixel::BitDepth16::new(10));
+        check(crate::pixel::BitDepth16::new(12));
+    }
 
     #[test]
     fn frame_cdf_averaging_uses_at_most_eight_power_of_two_tiles() {
