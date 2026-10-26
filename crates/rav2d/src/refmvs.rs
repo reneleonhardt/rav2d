@@ -2945,17 +2945,19 @@ pub fn load_tmvs(
     }
     if tmvp_sample_step > 1 {
         let off = offset as usize;
-        for n in 0..n_ref_frames as usize {
-            fill_gap_traj(
-                &mut rf.rp_traj[n][off..],
-                stride,
-                col_start8,
-                col_end8,
-                row_start8,
-                row_end8,
-                mfmv_sbsz8,
-                sbsz8,
-            );
+        if mv_traj {
+            for n in 0..n_ref_frames as usize {
+                fill_gap_traj(
+                    &mut rf.rp_traj[n][off..],
+                    stride,
+                    col_start8,
+                    col_end8,
+                    row_start8,
+                    row_end8,
+                    mfmv_sbsz8,
+                    sbsz8,
+                );
+            }
         }
         let pp = poffset as usize;
         fill_gap_proj(
@@ -4806,6 +4808,31 @@ mod tests {
                     INVALID_MV,
                     "rp_proj[{idx}] should be INVALID_MV"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn load_tmvs_without_trajectories_preserves_other_cells() {
+        for step in [1, 2] {
+            for refs in [0, 1, 7] {
+                let mut rf = make_default_frame();
+                rf.sbsz = 16;
+                rf.ih8 = 8;
+                rf.iw8 = 8;
+                rf.rp_stride = 8;
+                rf.mfmv_sbsz8 = 8 * step;
+                rf.rp_proj = vec![make_sngl_mv_block(31, -47, 3); 144];
+                load_tmvs(&mut rf, 0, 2, 6, 0, 4, false, 0, false, step, refs);
+                assert!(rf.rp_traj.iter().all(Vec::is_empty));
+                for (i, block) in rf.rp_proj.iter().enumerate() {
+                    let cleared = (16..48).contains(&i) && (2..6).contains(&(i % 8));
+                    assert_eq!(
+                        unsafe { (block.mv.c.y, block.mv.c.x) },
+                        if cleared { (INVALID_MV, 0) } else { (31, -47) }
+                    );
+                    assert_eq!(block.r#ref, 3);
+                }
             }
         }
     }
