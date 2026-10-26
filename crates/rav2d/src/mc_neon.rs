@@ -550,6 +550,8 @@ mod neon {
             || !valid_compound_w(w)
             || !chunk_fits(tmp1.len(), w, h)
             || !chunk_fits(tmp2.len(), w, h)
+            // Small upstream kernels leave no padding between mask rows.
+            || (w <= 8 && mask_stride != (w >> usize::from(ss_hor)))
         {
             return false;
         }
@@ -1112,6 +1114,68 @@ mod tests {
                 crate::mc::mask_8bpc(&mut ma, w, a1, a2, w, h, &msk);
                 super::mask_8bpc(&mut mb, w, a1, a2, w, h, &msk);
                 assert_eq!(ma, mb, "mask w={w} h={h}");
+            }
+        }
+    }
+
+    #[test]
+    fn blend_and_generated_masks_match_scalar() {
+        crate::cpu::init_cpu();
+        for w in [2usize, 4, 8, 12, 16, 32, 64, 128] {
+            for h in [4, 8, 64] {
+                let len = super::compound_tmp_len(w, h);
+                let stride = w + 3;
+                let tmp: Vec<_> = (0..len).map(|i| (i * 131 + 17) as u8).collect();
+                let mask: Vec<_> = (0..len)
+                    .map(|i| [0, 32, 64, (i * 7 % 65) as u8][i % 4])
+                    .collect();
+                let mut a = vec![157u8; stride * h + 16];
+                let mut b = a.clone();
+                crate::mc::blend_8bpc(&mut a, stride, &tmp, w, h, &mask);
+                super::blend_8bpc(&mut b, stride, &tmp, w, h, &mask);
+                assert_eq!(a, b, "blend {w}x{h}");
+                let t1: Vec<_> = (0..len).map(|i| ((i * 47 % 8192) as i16) - 2048).collect();
+                let t2: Vec<_> = (0..len).map(|i| ((i * 89 % 8192) as i16) - 2048).collect();
+                for (ss_hor, ss_ver) in [(false, false), (true, false), (true, true)] {
+                    for sign in [0, 1] {
+                        for mask_stride in
+                            [w >> usize::from(ss_hor), (w >> usize::from(ss_hor)) + 3]
+                        {
+                            let mut ma = vec![173; mask_stride * (h >> usize::from(ss_ver)) + 16];
+                            let mut mb = ma.clone();
+                            a.fill(157);
+                            b.fill(157);
+                            crate::mc::w_mask_8bpc(
+                                &mut a,
+                                stride,
+                                &t1,
+                                &t2,
+                                w,
+                                h,
+                                &mut ma,
+                                mask_stride,
+                                sign,
+                                ss_hor,
+                                ss_ver,
+                            );
+                            super::w_mask_8bpc(
+                                &mut b,
+                                stride,
+                                &t1,
+                                &t2,
+                                w,
+                                h,
+                                &mut mb,
+                                mask_stride,
+                                sign,
+                                ss_hor,
+                                ss_ver,
+                            );
+                            assert_eq!(a, b, "w_mask pixels {w}x{h} {ss_hor}/{ss_ver} sign={sign}");
+                            assert_eq!(ma, mb, "w_mask mask {w}x{h} {ss_hor}/{ss_ver} sign={sign}");
+                        }
+                    }
+                }
             }
         }
     }
