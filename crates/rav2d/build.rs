@@ -64,7 +64,7 @@
 //! The dav2d submodule is referenced read-only; nothing under `dav2d/src` or
 //! `dav2d/include` is modified. When the submodule is absent (e.g. a crate
 //! published to crates.io), the kernels and their headers/tables are assembled
-//! from verbatim copies vendored under `vendor/dav2d-asm/` instead — see
+//! from files packaged under `vendor/dav2d-asm/` instead — see
 //! `dav2d_root()` and `vendor/dav2d-asm/NOTICE.md`.
 //!
 //! On other architectures, and if neither the submodule nor the vendored asm is
@@ -89,14 +89,18 @@ fn main() {
 /// In a workspace checkout the `dav2d` git submodule lives at `../../dav2d`
 /// (next to the workspace root) and carries a meson `build/` directory with the
 /// generated `config.h`. When the crate is published to crates.io the submodule
-/// is gone, so we fall back to the verbatim copies vendored under
+/// is gone, so we fall back to the regular files packaged under
 /// `crates/rav2d/vendor/dav2d-asm/` (see that directory's NOTICE.md). Whichever
 /// root we pick must contain both the kernel `.S` and a `build/config.h`.
 fn dav2d_root() -> PathBuf {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
     let submodule = manifest.join("../../dav2d");
-    if submodule.join("src/arm/64/mc.S").exists() && submodule.join("build/config.h").exists() {
+    // Meson settings describe the host. Cross-builds use the portable settings.
+    if env::var("HOST") == env::var("TARGET")
+        && submodule.join("src/arm/64/mc.S").exists()
+        && submodule.join("build/config.h").exists()
+    {
         return submodule.canonicalize().unwrap_or(submodule);
     }
 
@@ -127,6 +131,10 @@ fn build_neon_mc() {
 
     println!("cargo:rerun-if-changed={}", mc_s.display());
     println!("cargo:rerun-if-changed={}", mc_dotprod_s.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        src.join("arm/64/mc_common.S").display()
+    );
     println!("cargo:rerun-if-changed={}", src.join("arm/asm.S").display());
     println!(
         "cargo:rerun-if-changed={}",

@@ -97,19 +97,37 @@ jobs:
           DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
           LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
 
-  # The production rav2d crate must package and build standalone — without the
-  # dav2d submodule — so it can be published to crates.io. This job removes the
-  # submodule before running the publish verification to prove the vendored NEON
-  # asm path (crates/rav2d/vendor/dav2d-asm) is self-contained.
-  publish-dry-run:
-    name: publish dry-run (rav2d standalone)
-    runs-on: ubuntu-latest
+  standalone:
+    name: standalone (${{ matrix.os }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04-arm, macos-26, macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout (no submodules)
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: cargo publish --dry-run (rav2d)
-        run: cargo publish -p rav2d --dry-run
+      - name: Enable Git symlinks (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.symlinks true
+          git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package and verify the library
+        if: runner.os != 'Windows'
+        run: nice -n 10 cargo package --locked -p rav2d
+      - name: Package and verify the library (Windows, lower priority)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+          cargo package --locked -p rav2d
+          exit $LASTEXITCODE
+      - name: Check packaged files and remove the submodule
+        shell: bash
+        run: |
+          ${{ runner.os == 'Windows' && 'python' || 'python3' }} tools/vendor_dav2d.py --package target/package/rav2d-*.crate
+          rm -rf dav2d crates/rav2d/vendor/dav2d-asm
+          cp -R target/package/rav2d-*/vendor/dav2d-asm crates/rav2d/vendor/
