@@ -46,7 +46,7 @@ ARM64 = [
 ]
 SDE = {
     "Skylake-Server": "skx", "Cascadelake-Server": "clx", "Cooperlake": "cpx",
-    "Icelake-Server": "icl-server", "SapphireRapids": "spr", "GraniteRapids": "gnr",
+    "Icelake-Server": "icx", "SapphireRapids": "spr", "GraniteRapids": "gnr",
 }
 
 

@@ -104,11 +104,11 @@ class ArtifactTests(unittest.TestCase):
             with patch.object(artifacts, "ARTIFACTS", root), patch.dict(artifacts.os.environ), \
                  patch.object(artifacts.subprocess, "run", side_effect=results) as run, \
                  patch.object(artifacts, "smoke") as smoke, redirect_stdout(io.StringIO()):
-                artifacts.run("sde64 -icl-server --")
+                artifacts.run("sde64 -icx --")
                 self.assertEqual(len(run.call_args_list), 5)
                 for call in run.call_args_list:
-                    self.assertEqual(call.args[0][3:6], ["sde64", "-icl-server", "--"])
-                smoke.assert_called_once_with(root / "rav2d", "sde64 -icl-server --")
+                    self.assertEqual(call.args[0][3:6], ["sde64", "-icx", "--"])
+                smoke.assert_called_once_with(root / "rav2d", "sde64 -icx --")
 
     def test_cpu_matrix_matches_emulator_capabilities(self):
         cpus = matrix.matrix(True)["include"]

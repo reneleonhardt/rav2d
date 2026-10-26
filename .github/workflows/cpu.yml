@@ -63,8 +63,8 @@ jobs:
           - cpu: Icelake-Server
             rust_cpu: icelake-server
             flags: 31
-            sde: icl-server
-            emulator: sde64 -icl-server --
+            sde: icx
+            emulator: sde64 -icx --
     env:
       RUSTFLAGS: -Ctarget-cpu=${{ matrix.rust_cpu }}
       QEMU_CPU: ${{ matrix.cpu }}
