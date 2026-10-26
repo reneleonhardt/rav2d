@@ -181,6 +181,12 @@ Bit-exactness proves the decoder computes the right picture; it says nothing abo
 - **`fuzz`** runs the `decode` and `decode_settings` [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets. `decode_settings` derives the decoder configuration from the input, so grain, header-only parsing, invisible-frame output and the per-filter combinations get fuzzed too. The corpus is seeded from the conformance vectors and carried between runs, and every crash it has found is replayed by `fuzz_regression_corpus_no_panic` in ordinary CI.
 - **`sanitizers`** runs the unit tests, the regression corpus and the conformance sweeps under AddressSanitizer (with leak detection where the C reference is not involved), and the multi-threaded decode under ThreadSanitizer.
 
+CI tests debug and release builds on Linux x86-64, Linux ARM64, Intel macOS and ARM64 macOS.
+Standalone jobs build with packaged assembly files after removing the C submodule, including Windows x86-64.
+A separate Linux musl job builds without the C submodule.
+The release CLI must produce the same displayed samples as the independent avmdec reference hash.
+Rust 1.85 remains a required production build.
+
 ```sh
 cd crates/rav2d/fuzz
 ./seed-corpus.sh decode

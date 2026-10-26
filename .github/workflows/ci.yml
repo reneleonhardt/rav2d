@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '11 2 * * *'
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,89 +19,101 @@ env:
 jobs:
   test:
     name: test (${{ matrix.os }})
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-22.04
+            artifact: amd64
+            rustflags: -Ctarget-cpu=x86-64
+            cflags: -march=x86-64
+          - os: ubuntu-24.04-arm
+            artifact: arm64
+          - os: macos-26
+          - os: macos-15-intel
     runs-on: ${{ matrix.os }}
-
     env:
       DAV2D_LIB_PATH: ${{ github.workspace }}/dav2d/build/src
-
+      DYLD_LIBRARY_PATH: ${{ github.workspace }}/dav2d/build/src
+      LD_LIBRARY_PATH: ${{ github.workspace }}/dav2d/build/src
+      RAV2D_NEON_OFF: ''
+      RUSTFLAGS: ${{ matrix.rustflags || '' }}
+      CFLAGS: ${{ matrix.cflags || '' }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: recursive
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
-      - name: Install build deps (Linux)
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-${{ matrix.os }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm
-
-      - name: Install build deps (macOS)
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm libclang-dev
+      - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install meson ninja nasm
-
-      - name: Build dav2d (conformance oracle)
+      - name: Verify assembly matches the pinned submodule
+        run: python3 tools/vendor_dav2d.py --check
+      - name: Build the pinned C reference decoder
         run: |
-          cd dav2d
-          meson setup build --default-library=both
-          ninja -C build
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      # --all-targets: without it the tests, benches and examples are never
-      # linted, and they are where the drift collects.
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-        env:
-          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-
-      - name: cargo test (lib)
-        run: cargo test -p rav2d --lib -- --test-threads=1
-        env:
-          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-
-      - name: cargo test (conformance, NEON/native)
-        run: cargo test -p rav2d --test conformance
-        env:
-          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-
-      # On aarch64 the decoder dispatches MC/ipred to the NEON kernels; rerun the
-      # conformance corpus with the scalar Rust path forced on so both stay
-      # bit-exact. The macOS runner is aarch64.
-      - name: cargo test (conformance, scalar fallback)
-        if: runner.os == 'macOS'
-        run: cargo test -p rav2d --test conformance
+          nice -n 10 meson setup dav2d/build dav2d --default-library=both -Denable_tests=true -Dtrim_dsp=false
+          nice -n 10 ninja -C dav2d/build
+      - name: C reference assembly tests
+        run: nice -n 10 dav2d/build/tests/checkasm -v
+      - name: Cross-build Linux NEON with a configured macOS submodule
+        if: matrix.os == 'macos-26'
+        run: |
+          brew install zig
+          nice -n 10 cargo install cargo-zigbuild --locked --version 0.24.0
+          rustup target add aarch64-unknown-linux-gnu
+          nice -n 10 cargo zigbuild --locked --release -p rav2d-cli --target aarch64-unknown-linux-gnu
+      - name: Format
+        if: matrix.os == 'ubuntu-22.04'
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo fmt --all --check
+      - name: Test the vendor update helper
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          nice -n 10 python3 tools/test_vendor_dav2d.py
+      - name: Lint all targets
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Library tests (native)
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --lib -- --test-threads=1
+      - name: Conformance (native)
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --test conformance
+      - name: Library and conformance (NEON dispatch off)
+        if: runner.arch == 'ARM64'
         env:
           RAV2D_NEON_OFF: all
-          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-
-      # Replay every fuzzer-discovered crashing input to guard against
-      # regressing a previously-fixed malformed-input panic. Only the fast
-      # regression test runs here; the exhaustive random/mutated fuzz sweeps
-      # (tests/fuzz.rs) are too slow for CI and run out of band.
-      - name: cargo test (fuzz regression corpus)
-        run: cargo test -p rav2d --test fuzz fuzz_regression_corpus_no_panic
-        env:
-          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-
-      - name: cargo build --release
-        run: cargo build --release --workspace
-        env:
-          DYLD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
-          LD_LIBRARY_PATH: ${{ env.DAV2D_LIB_PATH }}
+        run: |
+          nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --lib -- --test-threads=1
+          nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --test conformance
+      - name: Fuzz regression inputs
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --test fuzz fuzz_regression_corpus_no_panic
+      - name: Public API documentation examples
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --doc
+      - name: Build the release CLI
+        run: |
+          nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo build --locked --release -p rav2d-cli
+      - name: Release library tests
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked --release -p rav2d --lib -- --test-threads=1
+      - name: Release conformance
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked --release -p rav2d --test conformance
+      - name: Release fuzz regression inputs
+        run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked --release -p rav2d --test fuzz fuzz_regression_corpus_no_panic
+      - name: Release CLI output
+        run: python3 tools/ci/smoke.py target/release/rav2d
+      - name: Ubuntu 26.10 CLI compatibility
+        if: matrix.artifact == 'amd64'
+        run: docker run --rm --platform linux/amd64 -v "$PWD:$PWD" -w "$PWD" ubuntu:26.10 nice -n 10 target/release/rav2d crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu -t 1
 
   standalone:
     name: standalone (${{ matrix.os }})
@@ -131,3 +149,46 @@ jobs:
           ${{ runner.os == 'Windows' && 'python' || 'python3' }} tools/vendor_dav2d.py --package target/package/rav2d-*.crate
           rm -rf dav2d crates/rav2d/vendor/dav2d-asm
           cp -R target/package/rav2d-*/vendor/dav2d-asm crates/rav2d/vendor/
+      - name: Build and unit test the standalone CLI
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          nice -n 10 cargo build --locked --release -p rav2d-cli
+          nice -n 10 cargo test --locked -p rav2d-cli
+      - name: Build and unit test the CLI (Windows, lower priority)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
+          cargo build --locked --release -p rav2d-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p rav2d-cli
+          exit $LASTEXITCODE
+      - name: Decode using the standalone library
+        shell: bash
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} tools/ci/smoke.py "target/release/rav2d${{ runner.os == 'Windows' && '.exe' || '' }}"
+
+  msrv:
+    name: Rust 1.85 production build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: nice -n 10 cargo check --locked -p rav2d-cli
+
+  musl:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build and run static production CLI
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          nice -n 10 cargo build --locked --release -p rav2d-cli --target x86_64-unknown-linux-musl
+          python3 tools/ci/smoke.py target/x86_64-unknown-linux-musl/release/rav2d
