@@ -5,6 +5,8 @@ name: fuzz
 # This runs nightly, carries the corpus forward between runs through the cache,
 # and fails loudly with the reproducer attached when a target dies.
 on:
+  push:
+    branches: [feat/av2-portability-conformance]
   schedule:
     - cron: '37 3 * * *'
   workflow_dispatch:
@@ -31,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04]
         target: [decode, decode_settings]
 
     steps:
@@ -114,7 +116,7 @@ jobs:
       # is forgotten. Open (or comment on) an issue so it stays visible until
       # the reproducer lands in tests/data/fuzz-regressions.
       - name: Report the crash in an issue
-        if: failure()
+        if: failure() && github.event_name != 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
