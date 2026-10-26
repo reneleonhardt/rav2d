@@ -382,7 +382,7 @@ impl Picture {
         let bytes = self.plane_row_bytes(pl, y)?;
         // The allocator contract promises 2-byte-aligned HBD planes and strides;
         // check anyway so a buggy custom allocator yields `None` and not UB.
-        if !(bytes.as_ptr() as usize).is_multiple_of(std::mem::align_of::<u16>()) {
+        if bytes.as_ptr() as usize % std::mem::align_of::<u16>() != 0 {
             return None;
         }
         // SAFETY: `bytes` is `pw * 2` bytes of a live plane, just checked to be
@@ -760,6 +760,11 @@ mod tests {
             assert_eq!(pic.plane_rows_u8(pl).count(), 0);
             assert_eq!(pic.plane_rows_u16(pl).count(), ph);
         }
+        let aligned = pic.data[0].unwrap();
+        // Use an address inside the row that is not aligned for u16.
+        pic.data[0] = NonNull::new(unsafe { aligned.as_ptr().add(1) });
+        assert_eq!(pic.plane_row_u16(0, 0), None);
+        pic.data[0] = Some(aligned);
     }
 
     #[test]

@@ -1799,22 +1799,19 @@ pub fn refmvs_find(
     }
 
     // warp from corners
-    if warp.is_some()
-        && let Some(bml_b) = bml
-        && {
+    if let Some(bml_b) = bml.filter(|bml_b| {
+        warp.is_some() && {
             let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
             bl_ref_idx == 0 || (unsafe { bml_b.r#ref.r[1] } == ref0 && bml_b.mf & 2 == 0)
         }
-    {
+    }) {
         let bl_ref_idx = (unsafe { bml_b.r#ref.r[0] } != ref0) as usize;
         let bl_mv = if bml_b.mf & 2 == 0 {
             bml_b.mv[bl_ref_idx]
         } else {
             get_warpmv_proj(&bml_b.m, bx4 * 4, (by4 + bh4) * 4, minx, maxx, miny, maxy)
         };
-        if let Some(tl_b) = tl
-            && let Some(rmt_b) = rmt
-        {
+        if let (Some(tl_b), Some(rmt_b)) = (tl, rmt) {
             let tl_ref_idx = (unsafe { tl_b.r#ref.r[0] } != ref0) as usize;
             let tr_ref_idx = (unsafe { rmt_b.r#ref.r[0] } != ref0) as usize;
             let cond_tl =
@@ -1833,18 +1830,16 @@ pub fn refmvs_find(
                     get_warpmv_proj(&rmt_b.m, (bx4 + bw4) * 4, by4 * 4, minx, maxx, miny, maxy)
                 };
                 let mut mat = [0i32; 7];
-                if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim)
-                    && let Some(ref mut w) = warp
-                {
+                if let (true, Some(w)) = (
+                    model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim),
+                    warp.as_mut(),
+                ) {
                     w[*warp_cnt as usize] = mat;
                     *warp_cnt += 1;
                 }
             }
         }
-        if *warp_cnt == 0
-            && let Some(lmt_b) = lmt
-            && let Some(tr_b) = tr
-        {
+        if let (0, Some(lmt_b), Some(tr_b)) = (*warp_cnt, lmt, tr) {
             let tl_ref_idx = (unsafe { lmt_b.r#ref.r[0] } != ref0) as usize;
             let tr_ref_idx = (unsafe { tr_b.r#ref.r[0] } != ref0) as usize;
             let cond_tl =
@@ -1863,9 +1858,10 @@ pub fn refmvs_find(
                     get_warpmv_proj(&tr_b.m, (bx4 + bw4) * 4, by4 * 4, minx, maxx, miny, maxy)
                 };
                 let mut mat = [0i32; 7];
-                if model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim)
-                    && let Some(ref mut w) = warp
-                {
+                if let (true, Some(w)) = (
+                    model_from_corners(&mut mat, tl_mv, tr_mv, bl_mv, bx4 * 4, by4 * 4, b_dim),
+                    warp.as_mut(),
+                ) {
                     w[*warp_cnt as usize] = mat;
                     *warp_cnt += 1;
                 }
@@ -2117,10 +2113,9 @@ pub fn refmvs_find(
             if bh4 == h4 {
                 let pos = ((by4 + bh4 - 1) & 63) as usize * 128 + ((bx4 - adj) & 127) as usize;
                 let ext_bml = &rt.r[pos];
-                if let Some(bml_b) = bml
-                    && (BLOCK_DIMENSIONS[ext_bml.bs as usize][0] < adj as u8
-                        || ext_bml.bs != bml_b.bs)
-                {
+                if bml.is_some_and(|bml_b| {
+                    BLOCK_DIMENSIONS[ext_bml.bs as usize][0] < adj as u8 || ext_bml.bs != bml_b.bs
+                }) {
                     add_matrix!(ext_bml, limited_no_type);
                     add_spatial_candidate(
                         bh4 - 1,
@@ -2146,10 +2141,9 @@ pub fn refmvs_find(
             if bh4 > 1 {
                 let pos = (by4 & 63) as usize * 128 + ((bx4 - adj) & 127) as usize;
                 let ext_tml = &rt.r[pos];
-                if let Some(tml_b) = tml
-                    && (BLOCK_DIMENSIONS[ext_tml.bs as usize][0] < adj as u8
-                        || ext_tml.bs != tml_b.bs)
-                {
+                if tml.is_some_and(|tml_b| {
+                    BLOCK_DIMENSIONS[ext_tml.bs as usize][0] < adj as u8 || ext_tml.bs != tml_b.bs
+                }) {
                     add_matrix!(ext_tml, limited_no_type);
                     add_spatial_candidate(
                         0,
@@ -2336,9 +2330,7 @@ pub fn refmvs_find(
     }
 
     // warp bank + gmv + defaults
-    if let Some(ref mut warp_out) = warp
-        && *warp_cnt < 4
-    {
+    if let Some(warp_out) = warp.as_mut().filter(|_| *warp_cnt < 4) {
         debug_assert!((ref0 as usize) < TIP_FRAME && ref1 == -1);
         let sz = rt.warp.size[ref0 as usize] as usize;
         let idx = rt.warp.idx[ref0 as usize] as usize;
@@ -2438,9 +2430,7 @@ pub fn refmvs_find(
         mvstack[n].y_off = 0;
     }
 
-    if let Some(ref w) = warp
-        && env_flag!("RAV2D_WARP_TRACE")
-    {
+    if let Some(w) = warp.as_ref().filter(|_| env_flag!("RAV2D_WARP_TRACE")) {
         eprintln!(
             "WTRACE by4={} bx4={} ref0={} ref1={} warp_cnt={}",
             by4, bx4, ref0, ref1, *warp_cnt

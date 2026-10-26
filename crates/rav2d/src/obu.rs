@@ -2774,10 +2774,10 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
                 check_trailing_bits(&mut gb, c.strict_std_compliance)?;
             }
 
-            if let Some(ref fh) = c.frame_hdr
-                && c.frame_size_limit > 0
-                && (fh.width as u64) * (fh.height as u64) > c.frame_size_limit as u64
-            {
+            if c.frame_hdr.as_ref().is_some_and(|fh| {
+                c.frame_size_limit > 0
+                    && (fh.width as u64) * (fh.height as u64) > c.frame_size_limit as u64
+            }) {
                 c.frame_hdr = None;
                 return Err(Rav2dError::FrameTooLarge);
             }

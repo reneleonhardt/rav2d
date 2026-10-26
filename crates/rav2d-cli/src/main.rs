@@ -204,7 +204,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         write_picture(writer, &pic)?;
                     }
 
-                    if frames_decoded.is_multiple_of(100) {
+                    if frames_decoded % 100 == 0 {
                         eprint!("\rrav2d: {} frames decoded", frames_decoded);
                     }
                 }
