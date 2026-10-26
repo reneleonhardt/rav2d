@@ -71,7 +71,7 @@ jobs:
       - name: Build optimized test artifacts
         run: |
           nice -n 10 meson setup dav2d/build dav2d --default-library=both -Denable_tests=true -Dtrim_dsp=false
-          nice -n 10 ninja -C dav2d/build
+          nice -n 10 ninja -C dav2d/build all tests/checkasm
           nice -n 10 cargo build --locked --release -p rav2d-cli --target x86_64-unknown-linux-gnu
           nice -n 10 cargo test --locked --release -p rav2d --lib --test conformance --test fuzz --target x86_64-unknown-linux-gnu --no-run --message-format=json > target/test-artifacts.json
           python3 tools/ci/artifacts.py --pack target/test-artifacts.json --target x86_64-unknown-linux-gnu

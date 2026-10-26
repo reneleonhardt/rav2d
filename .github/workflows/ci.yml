@@ -68,7 +68,7 @@ jobs:
       - name: Build the pinned C reference decoder
         run: |
           nice -n 10 meson setup dav2d/build dav2d --default-library=both -Denable_tests=true -Dtrim_dsp=false
-          nice -n 10 ninja -C dav2d/build
+          nice -n 10 ninja -C dav2d/build all tests/checkasm
       - name: C reference assembly tests
         run: nice -n 10 dav2d/build/tests/checkasm -v
       - name: Cross-build Linux NEON with a configured macOS submodule
