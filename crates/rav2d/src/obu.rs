@@ -2945,6 +2945,81 @@ pub fn parse_obus(c: &mut DecoderContext, data: &[u8]) -> Result<usize> {
 mod tests {
     use super::*;
 
+    fn avm_sequence(name: &str) -> Vec<u8> {
+        let data = std::fs::read(format!(
+            "{}/tests/data/avmenc/{name}.obu",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert_eq!(&data[..2], &[1, 8]);
+        assert!(data[2] < 128 && data[3] == 4);
+        data[4..3 + data[2] as usize].to_vec()
+    }
+
+    #[test]
+    fn sequence_profile_boundaries() {
+        let mut data = avm_sequence("avmenc-v1-8bit");
+        for profile in 0..=31 {
+            if matches!(profile, 3 | 4 | 31) {
+                continue;
+            }
+            data[0] = (data[0] & 0x83) | profile << 2;
+            let result = parse_sequence_header(&data);
+            if profile <= 2 {
+                let header = result.unwrap();
+                assert_eq!(
+                    (header.profile, header.layout, header.hbd),
+                    (profile, PixelLayout::I420, 0)
+                );
+                assert_eq!((header.max_width, header.max_height), (64, 64));
+            } else {
+                assert!(result.is_err(), "unsupported profile {profile}");
+            }
+        }
+    }
+
+    #[test]
+    fn sequence_header_rejects_every_truncated_prefix() {
+        for name in ["avmenc-v1-8bit", "avmenc-v1-10bit"] {
+            let data = avm_sequence(name);
+            for end in 0..data.len() {
+                assert!(
+                    parse_sequence_header(&data[..end]).is_err(),
+                    "{name}: prefix {end}"
+                );
+            }
+            assert!(parse_sequence_header(&data).is_ok());
+        }
+    }
+
+    #[test]
+    #[ignore = "upstream dav2d also rejects AV2 Configurable profile 31"]
+    fn pending_sequence_profile_31() {
+        let mut data = avm_sequence("avmenc-v1-8bit");
+        data[0] = (data[0] & 0x83) | 31 << 2;
+        assert_eq!(parse_sequence_header(&data).unwrap().profile, 31);
+    }
+
+    #[test]
+    #[ignore = "upstream dav2d also rejects AV2 profile 3"]
+    fn pending_sequence_profile_3() {
+        let header = parse_sequence_header(&avm_sequence("avmenc-i422")).unwrap();
+        assert_eq!(
+            (header.profile, header.layout, header.hbd),
+            (3, PixelLayout::I422, 0)
+        );
+    }
+
+    #[test]
+    #[ignore = "upstream dav2d also rejects AV2 profile 4"]
+    fn pending_sequence_profile_4() {
+        let header = parse_sequence_header(&avm_sequence("avmenc-i444")).unwrap();
+        assert_eq!(
+            (header.profile, header.layout, header.hbd),
+            (4, PixelLayout::I444, 0)
+        );
+    }
+
     // avm counts GDF units and tile parity differently from dav2d; the
     // `unitsb` and `tiles` vectors first exposed both (zettel
     // rav2d-follows-avm-where-dav2d-differs).

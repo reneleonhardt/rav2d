@@ -17,7 +17,7 @@ def read_frames(path):
         header = f.readline().decode().split()
         params = {tok[0]: tok[1:] for tok in header[1:]}
         w, h = int(params["W"]), int(params["H"])
-        if params.get("C", "420").split("p")[0] not in ("420", "420jpeg", "420mpeg2"):
+        if params.get("C", "420") not in ("420", "420jpeg", "420mpeg2", "420p8"):
             sys.exit("source must be 8-bit 4:2:0")
         y_size, c_size = w * h, (w // 2) * (h // 2)
         while True:

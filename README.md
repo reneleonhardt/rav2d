@@ -8,7 +8,7 @@
 
 **rav2d** is a memory-safe **AV2** video decoder in Rust, ported from [dav2d](https://code.videolan.org/videolan/dav2d) (the C reference decoder, an AV2 fork of dav1d).
 
-> The entire C decode path has been ported to Rust and is **bit-exact** with dav2d: every coding-order frame of every shipped conformance clip matches byte-for-byte, with in-loop filters off **and** on, for both 8-bit and 10-bit streams. On top of that, the vectors encoded with the AOM reference encoder (`tests/data/avmenc`) match the md5 of `avmdec`, the AV2 reference decoder. **847 library + 25 conformance tests pass**, on the NEON and the all-scalar path alike.
+> The C reference tests compare every frame of their supported 8-bit and 10-bit fixtures with dav2d. They run with loop filters on and off. Separate tests compare supported AVM fixtures with `avmdec` hashes. Known failures have ignored assertions and nonblocking CI jobs.
 
 ## Status
 
@@ -31,9 +31,18 @@ Bit-exact against the dav2d C reference (verified by an FFI oracle that decodes 
 
 The full corpus (`bit_exact_full_clip_sweep`), the filtered corpus (`bit_exact_full_clip_filtered_sweep`), the 10-bit vectors (`bit_exact_hbd_sweep`), film grain (`bit_exact_filmgrain_applied`), scaled references (`bit_exact_scaled_ref_sweep`) and the coverage vectors (`bit_exact_coverage_sweep`, 4:0:0 and 4:2:0) are all enforced as tests.
 
-The avmenc vectors (`tools/vectors/`, built from avm `av2-normative` with `generate.sh`) are checked against `avmdec`'s md5 and, frame by frame, against dav2d (`avmenc_vectors_bit_exact`). Where dav2d disagrees with avm, rav2d follows avm and the vector is checked against `avmdec` only. Still pending, because dav2d does not match `avmdec` on them either and the port has no guide: 4:0:0, 4:2:2, 4:4:4, resize, and multiple tiles (`avmenc_pending_report` prints what they still get wrong).
+The fixtures in `crates/rav2d/tests/data/avmenc` use hashes from AVM's `avmdec`.
+`avmenc_vectors_bit_exact` also compares their frames with dav2d where the decoders agree.
+For supported fixtures that differ from dav2d, the test uses only the AVM hash.
 
-One shipped vector is deliberately not a bit-exact gate: `cov-multitile-416x240.obu`, whose keyframe entropy stream is malformed in a way dav2d cannot decode deterministically either — its own output differs between thread configurations. rav2d must decode it without panicking, which `coverage_decode_no_panic` enforces.
+Known failures cover monochrome, 4:2:2, 4:4:4, resize and multiple tiles.
+Each has a separate ignored `pending_*` test.
+Sequence-header tests also cover profiles 3, 4 and 31, which upstream rejects.
+Scheduled CI runs these tests without blocking the supported fixtures.
+
+The older multi-tile fixture (`cov-multitile-416x240.obu`) also fails its AVM reference hash.
+`pending_coverage_multitile` tests that output in nonblocking CI.
+`coverage_decode_no_panic` remains a blocking test for decoding without a panic.
 
 ## Why Rust?
 
@@ -144,6 +153,9 @@ RAV2D_NEON_OFF=all DYLD_LIBRARY_PATH=dav2d/build/src cargo test -p rav2d
 `crates/rav2d/tests/conformance.rs` is an FFI oracle: it decodes each clip with **both** rav2d and the dav2d C library and asserts byte-equal output. Test clips live in `crates/rav2d/tests/data` — the 8-bit vectors under `media/` came from dav2d, which has since stopped bundling them, and the rest were staged here. The dav2d submodule is kept pristine — it is the source of truth for the port.
 
 A second, independent gate compares against **avmdec**, the AOM reference decoder: every vector under `tests/data/media` ships the md5 avmdec produces for it, and `bit_exact_avm_reference_md5` hashes rav2d's visible frames, in display order, against it. Matching dav2d cannot catch a bug faithfully ported from the C — both agree and the gate stays green — so this one does not go through dav2d at all.
+
+The [AV2 1.0.0 coverage table](crates/rav2d/tests/CONFORMANCE.md) lists tested requirements, reference fixtures and gaps.
+This suite does not certify full conformance.
 
 ## Approach
 

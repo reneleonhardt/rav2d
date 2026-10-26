@@ -7,9 +7,8 @@
 //!
 //!   DYLD_LIBRARY_PATH=$PWD/dav2d/build/src cargo test -p rav2d --test conformance
 //!
-//! The full bit-exact comparison (`bit_exact_*`) is `#[ignore]`d until rav2d
-//! reconstruction produces pixels; the un-ignored test validates the reference
-//! decode path and the harness itself.
+//! Required fixtures and reference hashes must be present.
+//! Scheduled CI runs separate ignored tests for known decoder failures.
 
 use std::path::PathBuf;
 
@@ -33,6 +32,33 @@ fn media(name: &str) -> PathBuf {
 /// high-bit-depth `.obu` streams generated with the avm reference encoder.
 fn data(name: &str) -> PathBuf {
     PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data")).join(name)
+}
+
+fn require_fixture(path: &std::path::Path) {
+    assert!(
+        path.is_file(),
+        "missing conformance fixture: {}",
+        path.display()
+    );
+}
+
+#[test]
+fn required_fixtures_are_present() {
+    let manifest = include_str!("data/manifest.txt");
+    assert!(!manifest.is_empty(), "empty conformance fixture manifest");
+    for name in manifest.lines() {
+        let path = data(name);
+        assert!(path.is_file(), "missing conformance fixture: {name}");
+        if name.ends_with(".md5") {
+            let hash = std::fs::read_to_string(path).unwrap();
+            let hash = hash.trim();
+            assert_eq!(hash.len(), 32, "invalid reference hash: {name}");
+            assert!(
+                hash.bytes().all(|c| c.is_ascii_hexdigit()),
+                "invalid reference hash: {name}"
+            );
+        }
+    }
 }
 
 /// Chroma subsampling (ss_hor, ss_ver) for a dav2d pixel layout.
@@ -121,19 +147,24 @@ pub fn rav2d_decode_display(path: &PathBuf) -> Vec<FramePlanes> {
             match dec.send_data(Some(Data::wrap(bytes.clone()))) {
                 Ok(()) => sent = true,
                 Err(rav2d::Rav2dError::Again) => {}
-                Err(_) => break,
+                Err(error) => panic!("{}: send failed: {error}", path.display()),
             }
         }
         match dec.get_picture() {
             Ok(pic) => frames.push(rav2d_picture_planes(&pic)),
             Err(rav2d::Rav2dError::Again) => {
                 if sent {
-                    let _ = dec.send_data(None);
+                    dec.send_data(None).expect("drain decoder");
                 } else {
                     break;
                 }
             }
-            Err(_) => break,
+            Err(rav2d::Rav2dError::Eof) => break,
+            Err(error) => panic!(
+                "{}: decode failed after {} frames: {error}",
+                path.display(),
+                frames.len()
+            ),
         }
     }
     frames
@@ -352,12 +383,9 @@ fn md5_matches_known_vectors() {
 #[test]
 fn bit_exact_avm_reference_md5() {
     let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/media"));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        eprintln!("skip: {dir:?} not found");
-        return;
-    };
+    let entries = std::fs::read_dir(&dir).expect("read required media fixtures");
     let mut clips: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
+        .map(|e| e.expect("read media fixture entry").path())
         .filter(|p| p.extension().is_some_and(|e| e == "obu"))
         .collect();
     clips.sort();
@@ -366,9 +394,7 @@ fn bit_exact_avm_reference_md5() {
     let mut failures = Vec::new();
     for clip in clips {
         let md5_path = PathBuf::from(format!("{}.md5", clip.display()));
-        let Ok(expected) = std::fs::read_to_string(&md5_path) else {
-            continue;
-        };
+        let expected = std::fs::read_to_string(&md5_path).expect("read required avmdec hash");
         let expected = expected.trim().to_string();
         let name = clip.file_name().unwrap().to_string_lossy().to_string();
 
@@ -837,30 +863,6 @@ fn rav2d_picture_planes(pic: &rav2d::Picture) -> FramePlanes {
     }
 }
 
-/// Assert two decode results are byte-identical, plane by plane.
-pub fn assert_bit_exact(reference: &[FramePlanes], got: &[FramePlanes], clip: &str) {
-    assert_eq!(
-        reference.len(),
-        got.len(),
-        "{clip}: frame count mismatch (dav2d={}, rav2d={})",
-        reference.len(),
-        got.len()
-    );
-    for (i, (r, g)) in reference.iter().zip(got.iter()).enumerate() {
-        assert_eq!(
-            (r.w, r.h, r.bpc, r.layout),
-            (g.w, g.h, g.bpc, g.layout),
-            "{clip}: frame {i} params differ"
-        );
-        for pl in 0..3 {
-            assert_eq!(
-                r.planes[pl], g.planes[pl],
-                "{clip}: frame {i} plane {pl} bytes differ"
-            );
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -870,10 +872,7 @@ pub fn assert_bit_exact(reference: &[FramePlanes], got: &[FramePlanes], clip: &s
 #[test]
 fn dav2d_reference_decodes_keyframe_clip() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let frames = dav2d_decode(&path);
     assert!(!frames.is_empty(), "dav2d reference produced no frames");
     let f0 = &frames[0];
@@ -887,10 +886,7 @@ fn dav2d_reference_decodes_keyframe_clip() {
 #[test]
 fn bit_exact_keyframe_luma() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode(&path);
     let got = rav2d_decode(&path);
     assert!(!got.is_empty(), "rav2d produced no frames");
@@ -925,10 +921,7 @@ fn bit_exact_keyframe_luma() {
 #[test]
 fn bit_exact_keyframe_allplanes() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode(&path);
     let got = rav2d_decode(&path);
     assert!(!got.is_empty(), "rav2d produced no frames");
@@ -976,17 +969,6 @@ fn bit_exact_keyframe_allplanes() {
     }
 }
 
-/// Full bit-exact comparison rav2d vs dav2d (all planes, all frames, filters on).
-/// Enabled once chroma recon + post-filters + inter support land.
-#[test]
-#[ignore = "enabled later: needs chroma recon + post-filters + inter + filters-on"]
-fn bit_exact_keyframe_clip() {
-    let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    let reference = dav2d_decode(&path);
-    let got = rav2d_decode(&path);
-    assert_bit_exact(&reference, &got, "bus.64x64.l5");
-}
-
 /// M2 gate: frame-0 ALL PLANES must match the dav2d reference WITH in-loop
 /// filters ON (both decoders run deblock + CDEF (+CCSO) + loop restoration). The
 /// bus.64x64.l5 keyframe exercises CDEF (chroma strength 1), so this validates
@@ -994,10 +976,7 @@ fn bit_exact_keyframe_clip() {
 #[test]
 fn bit_exact_keyframe_filtered() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_filters(&path, DAV2D_INLOOPFILTER_ALL);
     let got = rav2d_decode_filters(&path, rav2d::InloopFilterType::All);
     assert!(!got.is_empty(), "rav2d produced no frames");
@@ -1541,10 +1520,7 @@ fn inter_frame1_diag() {
 #[test]
 fn bit_exact_first_inter_frame() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode(&path);
     let got = rav2d_decode(&path);
     assert!(got.len() > 1, "rav2d produced too few frames");
@@ -1598,10 +1574,7 @@ fn bit_exact_first_inter_frame() {
 #[test]
 fn bit_exact_full_clip_bus64() {
     let path = media("avm-v14.1.0-bus.64x64.l5.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_invisible(&path);
     let got = rav2d_decode(&path);
     assert!(!reference.is_empty(), "dav2d produced no frames");
@@ -1689,10 +1662,7 @@ fn bit_exact_full_clip_bus64() {
 #[test]
 fn bit_exact_full_clip_seg1() {
     let path = media("avm-v14.1.0-bus.352x288.l5.seg1.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_invisible(&path);
     let got = rav2d_decode(&path);
     assert!(!reference.is_empty(), "dav2d produced no frames");
@@ -1779,10 +1749,7 @@ fn bit_exact_full_clip_seg1() {
 #[test]
 fn bit_exact_full_clip_deltaq1() {
     let path = media("avm-v14.1.0-bus.352x288.l10.deltaq1.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_invisible(&path);
     let got = rav2d_decode(&path);
     assert!(!reference.is_empty(), "dav2d produced no frames");
@@ -1864,10 +1831,7 @@ fn bit_exact_full_clip_deltaq1() {
 #[test]
 fn bit_exact_full_clip_filmgrain() {
     let path = media("avm-v14.1.0-hm.64x64.l5.filmgrain.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_invisible(&path);
     let got = rav2d_decode(&path);
     assert!(!reference.is_empty(), "dav2d produced no frames");
@@ -1951,10 +1915,7 @@ fn bit_exact_full_clip_filmgrain() {
 #[test]
 fn bit_exact_filmgrain_applied() {
     let path = media("avm-v14.1.0-hm.64x64.l5.filmgrain.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_grain(&path);
     let got = rav2d_decode_grain(&path);
     assert!(!reference.is_empty(), "dav2d produced no frames");
@@ -2109,32 +2070,22 @@ fn avmenc_vectors() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = std::fs::read_dir(&dir)
         .map(|entries| {
             entries
-                .filter_map(|e| e.ok().map(|e| e.path()))
+                .map(|e| e.expect("read avmenc fixture entry").path())
                 .filter(|p| p.extension().is_some_and(|e| e == "obu"))
                 .collect()
         })
-        .unwrap_or_default();
+        .expect("read required avmenc fixtures");
     v.sort();
     v
 }
 
-/// avmenc vectors rav2d does not decode yet, with what is missing. They stay
-/// out of the gates below and are reported by `avmenc_pending_report`; a
-/// vector leaves this list in the commit that makes it pass.
+/// Streams with known decoder failures have separate ignored `pending_*` tests.
+/// When a fix makes a stream pass, remove it from this list.
 const AVMENC_PENDING: &[(&str, &str)] = &[
     // dav2d does not match avmdec on these either, so it cannot guide the port.
-    (
-        "avmenc-i400.obu",
-        "dav2d differs from avmdec too; md5 convention for 4:0:0 unchecked",
-    ),
-    (
-        "avmenc-i422.obu",
-        "dav2d differs from avmdec too; md5 convention for 4:2:2 unchecked",
-    ),
-    (
-        "avmenc-i444.obu",
-        "dav2d differs from avmdec too; md5 convention for 4:4:4 unchecked",
-    ),
+    ("avmenc-i400.obu", "displayed output differs from avmdec"),
+    ("avmenc-i422.obu", "stream produces no displayed frames"),
+    ("avmenc-i444.obu", "stream produces no displayed frames"),
     ("avmenc-resize.obu", "dav2d hangs on it; scaled references"),
     (
         "avmenc-tiles.obu",
@@ -2157,11 +2108,59 @@ fn avmenc_pending(path: &std::path::Path) -> Option<&'static str> {
         .map(|(_, why)| *why)
 }
 
+fn assert_avm_reference(name: &str) {
+    let path = data(name);
+    let expected = std::fs::read_to_string(format!("{}.md5", path.display())).unwrap();
+    let frames = rav2d_decode_display(&path);
+    assert!(!frames.is_empty(), "{name}: no displayed frames");
+    let mut hash = Md5::new();
+    for frame in &frames {
+        for plane in &frame.planes {
+            hash.update(plane);
+        }
+    }
+    assert_eq!(
+        hash.finish(),
+        expected.trim(),
+        "{name}: output differs from avmdec"
+    );
+}
+
+#[test]
+#[ignore = "known decoder gap: monochrome displayed output differs from avmdec"]
+fn pending_monochrome() {
+    assert_avm_reference("avmenc/avmenc-i400.obu");
+}
+
+#[test]
+#[ignore = "known decoder gap: 4:2:2 stream produces no displayed frames"]
+fn pending_chroma_422() {
+    assert_avm_reference("avmenc/avmenc-i422.obu");
+}
+
+#[test]
+#[ignore = "known decoder gap: 4:4:4 stream produces no displayed frames"]
+fn pending_chroma_444() {
+    assert_avm_reference("avmenc/avmenc-i444.obu");
+}
+
+#[test]
+#[ignore = "known decoder gap: resize output differs from avmdec"]
+fn pending_resize() {
+    assert_avm_reference("avmenc/avmenc-resize.obu");
+}
+
+#[test]
+#[ignore = "known decoder gap: tiled output differs from avmdec"]
+fn pending_tiles() {
+    assert_avm_reference("avmenc/avmenc-tiles.obu");
+}
+
 fn avmenc_failures(path: &PathBuf) -> Vec<String> {
     let mut failures = Vec::new();
     let expected = std::fs::read_to_string(format!("{}.md5", path.display()))
         .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+        .expect("read required avmdec hash");
     let mut hasher = Md5::new();
     let frames = rav2d_decode_display(path);
     for f in &frames {
@@ -2196,38 +2195,17 @@ fn avmenc_vectors_bit_exact() {
     let vectors = avmenc_vectors();
     assert!(!vectors.is_empty(), "no avmenc vectors found");
     let mut all = Vec::new();
+    let mut checked = 0;
     for path in vectors.iter().filter(|p| avmenc_pending(p).is_none()) {
+        checked += 1;
         let name = path.file_name().unwrap().to_string_lossy();
         for f in avmenc_failures(path) {
             all.push(format!("{name}: {f}"));
         }
     }
+    assert!(checked > 0, "no supported avmenc vectors checked");
     if !all.is_empty() {
         panic!("avmenc vectors not bit-exact:\n  {}", all.join("\n  "));
-    }
-}
-
-/// What the pending avmenc vectors still get wrong.
-#[test]
-#[ignore = "report on the vectors in AVMENC_PENDING, run with --ignored --nocapture"]
-fn avmenc_pending_report() {
-    for path in avmenc_vectors() {
-        let Some(why) = avmenc_pending(&path) else {
-            continue;
-        };
-        let name = path.file_name().unwrap().to_string_lossy();
-        let failures = avmenc_failures(&path);
-        eprintln!(
-            "{name} ({why}): {}",
-            if failures.is_empty() {
-                "passes now"
-            } else {
-                "fails"
-            }
-        );
-        for f in failures.iter().take(4) {
-            eprintln!("    {f}");
-        }
     }
 }
 
@@ -2283,10 +2261,7 @@ fn bit_exact_full_clip_sweep() {
     let mut all = Vec::new();
     for clip in clips {
         let path = media(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         let failures = full_clip_failures(&path);
         if failures.is_empty() {
             eprintln!("{clip}: full clip bit-exact");
@@ -2322,8 +2297,8 @@ fn bit_exact_full_clip_sweep() {
 /// back as a valid candidate pointing at reference 0. A later frame then picked
 /// that up as its highest-weighted candidate and predicted from the wrong place.
 ///
-/// The multi-tile vector (`cov-multitile-416x240.obu`) is still not a bit-exact
-/// gate; see `coverage_known_limitations`.
+/// The multi-tile vector has a separate ignored reference test.
+/// See `pending_coverage_multitile`.
 #[test]
 fn bit_exact_coverage_sweep() {
     let mut checked = 0;
@@ -2332,10 +2307,7 @@ fn bit_exact_coverage_sweep() {
         ("cov-420-128x128.obu", "4:2:0 intra + inter"),
     ] {
         let path = data(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         let failures = full_clip_failures(&path);
         if !failures.is_empty() {
             panic!(
@@ -2357,9 +2329,8 @@ fn bit_exact_coverage_sweep() {
 /// For the two vectors that fully reconstruct (monochrome 4:0:0 and the 4:2:0
 /// keyframe) the first (intra) frame must have the right geometry/layout — I400
 /// must carry no chroma planes. The multi-tile vector is `require_frames=false`:
-/// both rav2d and dav2d's single-pass decoders desync on its keyframe entropy
-/// stream (see `coverage_known_limitations`), so we only require that rav2d fails
-/// GRACEFULLY (no panic) rather than that it produces a frame.
+/// `pending_coverage_multitile` compares its output with AVM separately.
+/// This smoke test requires decoding without a panic.
 #[test]
 fn coverage_decode_no_panic() {
     // (clip, expected width, height, dav2d pixel layout: 0=I400, 1=I420, require_frames)
@@ -2371,10 +2342,7 @@ fn coverage_decode_no_panic() {
     let mut checked = 0usize;
     for (clip, w, h, layout, require_frames) in cases {
         let path = data(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         checked += 1;
         // rav2d_decode must return (no panic) for every vector.
         let got = rav2d_decode(&path);
@@ -2405,33 +2373,10 @@ fn coverage_decode_no_panic() {
     );
 }
 
-/// Documents (and pins, via `#[ignore]`) the one coverage vector that is NOT a
-/// bit-exact gate:
-///
-/// * `cov-multitile-416x240.obu` — the keyframe entropy stream desyncs at luma tx
-///   bx=64 by=4 (an out-of-range eob, `INT_MIN`) under single-pass decode. dav2d
-///   hits the identical desync at the identical block/MSAC state; its 2-pass task
-///   decoder merely swallows the error (the PASS_ENTROPY return is ignored in
-///   `decode.c`), so dav2d emits a partial keyframe whose pixels are not even
-///   stable across its own thread configs (MT vs `--threads 1` MD5s differ). The
-///   vector is therefore not bit-exact-matchable; it remains for the no-panic
-///   smoke gate above.
-///
-/// `cov-420-128x128.obu` used to be listed here as an entropy desync on its inter
-/// frames. It was neither: the entropy stream stayed in sync throughout, and the
-/// damage was two blocks of frame 2 predicted from a stale temporal MV candidate.
-/// It is a bit-exact gate now, in `bit_exact_coverage_sweep`.
 #[test]
-#[ignore = "cov-multitile: encoder-side single-pass desync, dav2d is non-deterministic on it too; see doc comment"]
-fn coverage_known_limitations() {
-    for clip in ["cov-multitile-416x240.obu"] {
-        let path = data(clip);
-        if !path.exists() {
-            continue;
-        }
-        let failures = full_clip_failures(&path);
-        assert!(failures.is_empty(), "{clip}: {}", failures.join("; "));
-    }
+#[ignore = "known decoder gap: coverage multi-tile output differs from avmdec"]
+fn pending_coverage_multitile() {
+    assert_avm_reference("cov-multitile-416x240.obu");
 }
 
 /// Reconstruct-and-compare a full clip with the FULL in-loop filter pipeline on
@@ -2549,10 +2494,7 @@ fn bit_exact_full_clip_filtered_sweep() {
     let mut all = Vec::new();
     for clip in clips {
         let path = media(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         let failures = full_clip_filtered_failures(&path);
         if failures.is_empty() {
             eprintln!("{clip}: full clip filtered bit-exact");
@@ -2614,10 +2556,7 @@ fn first_hbd_divergence(r: &FramePlanes, g: &FramePlanes) -> Option<(usize, usiz
 #[test]
 fn bit_exact_scaled_ref_sweep() {
     let path = data("resize-10bit-superres.obu");
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_invisible(&path);
     let got = rav2d_decode(&path);
     assert!(!reference.is_empty(), "dav2d produced no frames");
@@ -2663,10 +2602,7 @@ fn bit_exact_hbd_sweep() {
     let mut all = Vec::new();
     for clip in clips {
         let path = data(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         let reference = dav2d_decode_invisible(&path);
         let got = rav2d_decode(&path);
         assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
@@ -2727,10 +2663,7 @@ fn bit_exact_hbd_perfilter_sweep() {
     let mut all = Vec::new();
     for clip in clips {
         let path = data(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         for (name, dav_mask, rav_filter) in filters {
             let reference = dav2d_decode_filters_invisible(&path, dav_mask);
             let got = rav2d_decode_filters(&path, rav_filter);
@@ -2776,10 +2709,7 @@ fn bit_exact_hbd_filtered_sweep() {
     let mut all = Vec::new();
     for clip in clips {
         let path = data(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         let reference = dav2d_decode_filters_invisible(&path, DAV2D_INLOOPFILTER_ALL);
         let got = rav2d_decode_filters(&path, rav2d::InloopFilterType::All);
         assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
@@ -2824,10 +2754,7 @@ fn bit_exact_hbd_filtered_sweep() {
 fn bit_exact_hbd_grain_applied() {
     let clip = "hbd-10bit-128x128-grain.obu";
     let path = data(clip);
-    if !path.exists() {
-        eprintln!("skip: {path:?} not found");
-        return;
-    }
+    require_fixture(&path);
     let reference = dav2d_decode_grain(&path);
     let got = rav2d_decode_grain(&path);
     assert!(!reference.is_empty(), "{clip}: dav2d produced no frames");
@@ -2860,10 +2787,7 @@ fn bit_exact_hbd_grain_applied() {
 fn hbd_decode_smoke() {
     for clip in ["hbd-10bit-128x128-intra.obu", "hbd-10bit-128x128-8f.obu"] {
         let path = data(clip);
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            continue;
-        }
+        require_fixture(&path);
         let got = rav2d_decode(&path);
         assert!(!got.is_empty(), "{clip}: rav2d produced no frames");
         for (fi, g) in got.iter().enumerate() {
@@ -2915,10 +2839,7 @@ fn mt_matches_single_thread() {
     let mut checked = 0usize;
 
     let mut check = |name: &str, path: &PathBuf| {
-        if !path.exists() {
-            eprintln!("skip: {path:?} not found");
-            return;
-        }
+        require_fixture(path);
         // Film grain applied so the parallel grain kernel is exercised; it is a
         // no-op on non-grain clips (byte-identical copy either way).
         for &apply_grain in &[false, true] {
