@@ -58,6 +58,11 @@ jobs:
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install meson ninja nasm
+      - name: Install Meson for checkasm
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          nice -n 10 python3 -m pip install --user meson==1.10.0
+          echo "$(python3 -m site --user-base)/bin" >> "$GITHUB_PATH"
       - name: Verify assembly matches the pinned submodule
         run: python3 tools/vendor_dav2d.py --check
       - name: Build the pinned C reference decoder
