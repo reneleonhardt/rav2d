@@ -79,9 +79,10 @@ jobs:
       - name: Format
         if: matrix.os == 'ubuntu-22.04'
         run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo fmt --all --check
-      - name: Test the vendor update helper
+      - name: Test CI output checks
         if: matrix.os == 'ubuntu-22.04'
         run: |
+          nice -n 10 python3 tools/ci/test_smoke.py
           nice -n 10 python3 tools/test_vendor_dav2d.py
       - name: Lint all targets
         run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -96,13 +97,30 @@ jobs:
         run: |
           nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --lib -- --test-threads=1
           nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --test conformance
+      - name: Mixed NEON dispatch controls
+        if: runner.arch == 'ARM64'
+        run: |
+          for kernels in 'put_8tap,prep_bilin,ipred,dc_add,row_clip,unknown' 'ipred_h,warp_affine,mask,sad,residual_add'; do
+            RAV2D_NEON_OFF="$kernels" nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --lib -- neon simd::tests:: mc::tests::test_sad x8_transforms_match_scalar --test-threads=1
+          done
+      - name: Unit test the vendored NEON assembly
+        if: runner.arch == 'ARM64'
+        run: |
+          mv dav2d/build/config.h dav2d/build/config.h.native
+          trap 'mv dav2d/build/config.h.native dav2d/build/config.h; touch crates/rav2d/build.rs' EXIT
+          touch crates/rav2d/build.rs
+          nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --lib -- --list > target/vendored-neon-tests.txt
+          grep -Fx 'mc_neon::neon::eight_tap_dispatch_uses_best_available_backend: test' target/vendored-neon-tests.txt
+          grep -Fx 'ipred_neon::neon::neon_disable_controls: test' target/vendored-neon-tests.txt
+          nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --lib -- neon simd::tests:: mc::tests::test_sad x8_transforms_match_scalar --test-threads=1
       - name: Fuzz regression inputs
         run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --test fuzz fuzz_regression_corpus_no_panic
       - name: Public API documentation examples
         run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked -p rav2d --doc
-      - name: Build the release CLI
+      - name: Build release CLI and test executables
         run: |
           nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo build --locked --release -p rav2d-cli
+          nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked --release -p rav2d --lib --test conformance --test fuzz --no-run --message-format=json > target/test-artifacts.json
       - name: Release library tests
         run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked --release -p rav2d --lib -- --test-threads=1
       - name: Release conformance
@@ -111,9 +129,25 @@ jobs:
         run: nice -n 10 env DYLD_LIBRARY_PATH="$DAV2D_LIB_PATH" cargo test --locked --release -p rav2d --test fuzz fuzz_regression_corpus_no_panic
       - name: Release CLI output
         run: python3 tools/ci/smoke.py target/release/rav2d
+      - name: Package identical release artifacts for CPU testing
+        if: runner.os == 'Linux'
+        run: python3 tools/ci/artifacts.py --pack target/test-artifacts.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Linux'
+        with:
+          name: portable-${{ matrix.artifact }}
+          path: ci-artifacts/
+          if-no-files-found: error
+          retention-days: 3
       - name: Ubuntu 26.10 CLI compatibility
         if: matrix.artifact == 'amd64'
         run: docker run --rm --platform linux/amd64 -v "$PWD:$PWD" -w "$PWD" ubuntu:26.10 nice -n 10 target/release/rav2d crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu -t 1
+
+  cpu-families:
+    needs: test
+    uses: ./.github/workflows/cpu.yml
+    with:
+      extended: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
   standalone:
     name: standalone (${{ matrix.os }})
@@ -192,3 +226,37 @@ jobs:
         run: |
           nice -n 10 cargo build --locked --release -p rav2d-cli --target x86_64-unknown-linux-musl
           python3 tools/ci/smoke.py target/x86_64-unknown-linux-musl/release/rav2d
+
+  known-gaps:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: known decoder gap (${{ matrix.test }}, nonblocking)
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { binary: conformance-tests, test: pending_monochrome }
+          - { binary: conformance-tests, test: pending_chroma_422 }
+          - { binary: conformance-tests, test: pending_chroma_444 }
+          - { binary: conformance-tests, test: pending_resize }
+          - { binary: conformance-tests, test: pending_tiles }
+          - { binary: conformance-tests, test: pending_coverage_multitile }
+          - { binary: unit-tests, test: 'obu::tests::pending_sequence_profile_3' }
+          - { binary: unit-tests, test: 'obu::tests::pending_sequence_profile_4' }
+          - { binary: unit-tests, test: 'obu::tests::pending_sequence_profile_31' }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: portable-arm64
+          path: ci-artifacts
+      - name: Assert independent reference output
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/ci-artifacts/lib
+        run: |
+          chmod +x 'ci-artifacts/${{ matrix.binary }}'
+          nice -n 10 'ci-artifacts/${{ matrix.binary }}' --list | grep -Fx '${{ matrix.test }}: test'
+          nice -n 10 'ci-artifacts/${{ matrix.binary }}' '${{ matrix.test }}' --exact --ignored --nocapture

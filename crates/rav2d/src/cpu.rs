@@ -101,6 +101,15 @@ mod tests {
         #[cfg(target_arch = "aarch64")]
         assert!(flags & arm::CPU_FLAG_NEON != 0);
         let _ = flags;
+        if let Ok(expected) = std::env::var("RAV2D_TEST_CPU_FLAGS") {
+            assert_eq!(
+                flags,
+                expected.parse::<u32>().unwrap(),
+                "unexpected emulated CPU features"
+            );
+            #[cfg(all(target_arch = "aarch64", not(all(rav2d_neon_mc, rav2d_neon_ipred))))]
+            panic!("ARM family tests require MC and ipred assembly");
+        }
     }
 
     #[test]

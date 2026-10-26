@@ -1,0 +1,78 @@
+name: CPU families
+
+on:
+  workflow_call:
+    inputs:
+      extended:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    runs-on: ubuntu-26.04
+    outputs:
+      cpus: ${{ steps.matrix.outputs.cpus }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: matrix
+        run: echo "cpus=$(python3 tools/ci/matrix.py '${{ inputs.extended }}')" >> "$GITHUB_OUTPUT"
+
+  family:
+    name: ${{ matrix.name }}
+    needs: matrix
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.cpus) }}
+    env:
+      QEMU_CPU: ${{ matrix.cpu }}
+      RAV2D_TEST_CPU_FLAGS: ${{ matrix.flags }}
+      RAV2D_NEON_OFF: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: portable-${{ matrix.arch }}
+          path: ci-artifacts
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - name: Test identical portable artifacts
+        run: python3 tools/ci/artifacts.py --run --emulator '${{ matrix.emulator }}'
+
+  optimized:
+    if: inputs.extended
+    name: optimized (${{ matrix.cpu }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpu: Haswell
+            rust_cpu: haswell
+            flags: 15
+          - cpu: Icelake-Server
+            rust_cpu: icelake-server
+            flags: 31
+    env:
+      RUSTFLAGS: -Ctarget-cpu=${{ matrix.rust_cpu }}
+      QEMU_CPU: ${{ matrix.cpu }}
+      RAV2D_TEST_CPU_FLAGS: ${{ matrix.flags }}
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm libclang-dev qemu-user
+      - name: Build optimized test artifacts
+        run: |
+          nice -n 10 meson setup dav2d/build dav2d --default-library=both -Denable_tests=true -Dtrim_dsp=false
+          nice -n 10 ninja -C dav2d/build
+          nice -n 10 cargo build --locked --release -p rav2d-cli --target x86_64-unknown-linux-gnu
+          nice -n 10 cargo test --locked --release -p rav2d --lib --test conformance --test fuzz --target x86_64-unknown-linux-gnu --no-run --message-format=json > target/test-artifacts.json
+          python3 tools/ci/artifacts.py --pack target/test-artifacts.json --target x86_64-unknown-linux-gnu
+      - run: python3 tools/ci/artifacts.py --run --emulator qemu-x86_64

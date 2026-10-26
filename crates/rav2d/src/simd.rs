@@ -813,6 +813,22 @@ mod tests {
     use super::*;
     use crate::pixel::{BitDepth8, BitDepth16};
 
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_disable_controls() {
+        const NAMES: &[&str] = &["sad", "dc_add", "row_clip", "residual_add"];
+        let disabled: &[&str] = match std::env::var("RAV2D_NEON_OFF").unwrap_or_default().as_str() {
+            "" => &[],
+            "all" => NAMES,
+            "put_8tap,prep_bilin,ipred,dc_add,row_clip,unknown" => &["dc_add", "row_clip"],
+            "ipred_h,warp_affine,mask,sad,residual_add" => &["sad", "residual_add"],
+            _ => return,
+        };
+        for name in NAMES {
+            assert_eq!(neon::kern_on(name), !disabled.contains(name), "{name}");
+        }
+    }
+
     /// Pre-flight gate for kernels that shift signed sums: `wide::i32x8 >>` MUST
     /// be arithmetic (sign-propagating), like scalar `i32 >>`.
     #[test]

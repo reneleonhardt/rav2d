@@ -187,6 +187,18 @@ A separate Linux musl job builds without the C submodule.
 The release CLI must produce the same displayed samples as the independent avmdec reference hash.
 Rust 1.85 remains a required production build.
 
+CPU jobs run identical release binaries under separate QEMU CPU models.
+PRs cover representative x86 models and ARM NEON, dotprod and i8mm.
+Scheduled runs expand this to 33 x86 models and three ARM models.
+Separate optimized builds test AVX2 and AVX-512 code generation.
+Each CPU job also runs dav2d's checkasm tests for 8-bit and high-bit-depth kernels.
+The C build keeps reference code enabled. These jobs fail if checkasm runs no tests.
+The optimized files are only for tests.
+
+Missing required vectors or reference hashes fail CI.
+Known-gap jobs expose failures without establishing conformance for those streams.
+SVE/SVE2 have no decoder backend.
+
 ```sh
 cd crates/rav2d/fuzz
 ./seed-corpus.sh decode

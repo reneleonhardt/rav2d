@@ -160,6 +160,20 @@ mod neon {
         matches!(w, 4 | 8 | 16 | 32 | 64)
     }
 
+    #[test]
+    fn neon_disable_controls() {
+        const NAMES: &[&str] = &["ipred_h", "ipred_v", "ipred_smooth_h", "ipred_smooth_v"];
+        let disabled: &[&str] = match std::env::var("RAV2D_NEON_OFF").unwrap_or_default().as_str() {
+            "" => &[],
+            "all" | "put_8tap,prep_bilin,ipred,dc_add,row_clip,unknown" => NAMES,
+            "ipred_h,warp_affine,mask,sad,residual_add" => &["ipred_h"],
+            _ => return,
+        };
+        for name in NAMES {
+            assert_eq!(kern_on(name), !disabled.contains(name), "{name}");
+        }
+    }
+
     /// Call a whole-block predictor kernel. `tl[o]` is the topleft sample;
     /// `tl[o+1+x]` is the top row and `tl[o-1-y]` the left column, matching the
     /// asm's `topleft` pointer convention exactly.

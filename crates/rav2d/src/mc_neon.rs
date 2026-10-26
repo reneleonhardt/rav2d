@@ -214,9 +214,60 @@ mod neon {
     fn have_dotprod() -> bool {
         get_cpu_flags() & arm::CPU_FLAG_DOTPROD != 0
     }
+    #[test]
+    fn neon_disable_controls() {
+        const NAMES: &[&str] = &[
+            "put_8tap",
+            "prep_8tap",
+            "put_bilin",
+            "prep_bilin",
+            "avg",
+            "w_avg",
+            "mask",
+            "blend",
+            "w_mask",
+            "warp_affine",
+            "warp_affinet",
+        ];
+        let disabled: &[&str] = match std::env::var("RAV2D_NEON_OFF").unwrap_or_default().as_str() {
+            "" => &[],
+            "all" => NAMES,
+            "put_8tap,prep_bilin,ipred,dc_add,row_clip,unknown" => &["put_8tap", "prep_bilin"],
+            "ipred_h,warp_affine,mask,sad,residual_add" => &["warp_affine", "mask"],
+            _ => return,
+        };
+        for name in NAMES {
+            assert_eq!(kern_on(name), !disabled.contains(name), "{name}");
+        }
+    }
     #[inline]
     fn have_i8mm() -> bool {
         get_cpu_flags() & arm::CPU_FLAG_I8MM != 0
+    }
+
+    #[test]
+    fn eight_tap_dispatch_uses_best_available_backend() {
+        crate::cpu::init_cpu();
+        let flags = get_cpu_flags();
+        let (put, prep): (unsafe extern "C" fn(), unsafe extern "C" fn()) =
+            if flags & arm::CPU_FLAG_I8MM != 0 {
+                (
+                    dav2d_put_8tap_regular_8bpc_neon_i8mm,
+                    dav2d_prep_8tap_regular_8bpc_neon_i8mm,
+                )
+            } else if flags & arm::CPU_FLAG_DOTPROD != 0 {
+                (
+                    dav2d_put_8tap_regular_8bpc_neon_dotprod,
+                    dav2d_prep_8tap_regular_8bpc_neon_dotprod,
+                )
+            } else {
+                (
+                    dav2d_put_8tap_regular_8bpc_neon,
+                    dav2d_prep_8tap_regular_8bpc_neon,
+                )
+            };
+        assert_eq!(put_8tap_sym(0) as usize, put as usize);
+        assert_eq!(prep_8tap_sym(0) as usize, prep as usize);
     }
 
     /// Resolve the best `put` 8-tap symbol for `filter_type` (0/1/2) honoring the
