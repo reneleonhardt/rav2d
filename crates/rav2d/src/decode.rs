@@ -4219,21 +4219,30 @@ pub fn decode_frame(
         }
     })?;
 
-    // Finalize the output CDF (dav2d decode.c:5256-5272). For the single-thread
-    // path the update tile's adapted CDF becomes `out_cdf` with its symbol counts
-    // reset. avg_cdf_type (tile CDF shift/accumulate) is not exercised by the
-    // single-tile bring-up clips and is deferred. Only produced when CDF update
-    // is enabled (otherwise refs keep `in_cdf`, handled by the ref-list update).
+    finalize_frame_cdf(fc);
+
+    Ok(())
+}
+
+fn finalize_frame_cdf(fc: &mut crate::internal::FrameContext) {
+    let frame_hdr = &fc.frame_hdr;
     if frame_hdr.tip.frame_mode != 2 && frame_hdr.disable_cdf_update == 0 {
         let upd = frame_hdr.tiling.update as usize;
         if let Some(ts) = fc.ts.get(upd) {
             let mut out = ts.cdf.clone();
+            let n_tiles = frame_hdr.tiling.t.cols as usize * frame_hdr.tiling.t.rows as usize;
+            if n_tiles > 1 && fc.seq_hdr.avg_cdf_type != 0 {
+                // dav2d averages the first power-of-two group, capped at eight tiles.
+                let shift = n_tiles.ilog2().min(3);
+                out.shift(&fc.ts[0].cdf, shift);
+                for tile in &fc.ts[1..1 << shift] {
+                    out.shift_accumulate(&tile.cdf, shift);
+                }
+            }
             out.reset_count(frame_hdr.is_key_or_intra());
             fc.out_cdf = Some(std::sync::Arc::new(out));
         }
     }
-
-    Ok(())
 }
 
 /// Build a `FrameContext` from the decoder context's parsed headers and tile
@@ -18690,6 +18699,126 @@ pub fn decode_sb<BD: crate::pixel::BitDepth>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_cdf_averaging_uses_at_most_eight_power_of_two_tiles() {
+        use crate::headers::FrameType;
+        for (cols, rows) in [
+            (1, 1),
+            (2, 1),
+            (1, 3),
+            (2, 2),
+            (7, 1),
+            (2, 4),
+            (3, 3),
+            (8, 8),
+        ] {
+            let n = cols as usize * rows as usize;
+            for average in [false, true] {
+                for intra in [false, true] {
+                    let mut fc = crate::internal::FrameContext::default();
+                    std::sync::Arc::make_mut(&mut fc.seq_hdr).avg_cdf_type = u8::from(average);
+                    let hdr = std::sync::Arc::make_mut(&mut fc.frame_hdr);
+                    hdr.frame_type = if intra {
+                        FrameType::Key
+                    } else {
+                        FrameType::Inter
+                    };
+                    hdr.tiling.t.cols = cols;
+                    hdr.tiling.t.rows = rows;
+                    hdr.tiling.update = (n - 1) as u16;
+                    fc.ts = (0..n + 1)
+                        .map(|i| {
+                            let mut tile = crate::internal::TileState::default();
+                            tile.cdf.m.data.fill(1001 + i as u16 * 131);
+                            tile.cdf.coef.data.fill(2003 + i as u16 * 113);
+                            tile.cdf.mv.data.fill(3005 + i as u16 * 97);
+                            tile.cdf.dmv.data.fill(4007 + i as u16 * 89);
+                            tile
+                        })
+                        .collect();
+                    finalize_frame_cdf(&mut fc);
+                    let out = fc.out_cdf.as_ref().unwrap();
+                    let shift = n.ilog2().min(3);
+                    for (actual, base, step) in [
+                        (out.m.data[0], 1001, 131),
+                        (out.coef.data[0], 2003, 113),
+                        (out.mv.data[0], 3005, 97),
+                        (out.dmv.data[0], 4007, 89),
+                    ] {
+                        let expected: u16 = if average && n > 1 {
+                            (0..1 << shift).map(|i| (base + i * step) >> shift).sum()
+                        } else {
+                            base + (n as u16 - 1) * step
+                        };
+                        assert_eq!(
+                            actual, expected,
+                            "tiles={n}, average={average}, intra={intra}"
+                        );
+                    }
+                    if !average || n == 1 {
+                        let mut expected = fc.ts[n - 1].cdf.clone();
+                        expected.reset_count(intra);
+                        assert_eq!(out.m.data, expected.m.data);
+                        assert_eq!(out.coef.data, expected.coef.data);
+                        assert_eq!(out.mv.data, expected.mv.data);
+                        assert_eq!(out.dmv.data, expected.dmv.data);
+                    }
+                    assert_eq!(fc.ts[n].cdf.m.data[0], 1001 + n as u16 * 131);
+                    for (actual, offset, source, reset) in [
+                        (out.m.data[1], 1, 0, true),
+                        (out.coef.data[1], 1, 1, true),
+                        (out.mv.data[4], 4, 2, !intra),
+                        (out.dmv.data[4], 4, 3, true),
+                    ] {
+                        let entries: Vec<_> = fc
+                            .ts
+                            .iter()
+                            .map(|tile| {
+                                match source {
+                                    0 => tile.cdf.m.data[offset],
+                                    1 => tile.cdf.coef.data[offset],
+                                    2 => tile.cdf.mv.data[offset],
+                                    _ => tile.cdf.dmv.data[offset],
+                                }
+                                .to_ne_bytes()
+                            })
+                            .collect();
+                        let (count, parameter) = if average && n > 1 {
+                            (
+                                entries[..1 << shift]
+                                    .iter()
+                                    .map(|v| u16::from(v[0] >> shift))
+                                    .sum::<u16>(),
+                                entries[0][1],
+                            )
+                        } else {
+                            (u16::from(entries[n - 1][0]), entries[n - 1][1])
+                        };
+                        let count = if reset { count * 3 >> 2 } else { count };
+                        assert_eq!(actual.to_ne_bytes(), [count as u8, parameter]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn frame_cdf_disabled_and_tip_preserve_output() {
+        for (tip, disabled) in [(0, 1), (2, 0), (2, 1)] {
+            let mut fc = crate::internal::FrameContext::default();
+            let hdr = std::sync::Arc::make_mut(&mut fc.frame_hdr);
+            hdr.tip.frame_mode = tip;
+            hdr.disable_cdf_update = disabled;
+            fc.out_cdf = Some(std::sync::Arc::new(crate::cdf::CdfContext::default()));
+            let original = fc.out_cdf.clone().unwrap();
+            finalize_frame_cdf(&mut fc);
+            assert!(std::sync::Arc::ptr_eq(
+                fc.out_cdf.as_ref().unwrap(),
+                &original
+            ));
+        }
+    }
 
     /// Build a throwaway `ReconCtx` (and its backing scratch) bound to the given
     /// idents in the caller's scope. The recon leaf is a no-op under
