@@ -36,6 +36,7 @@ class ArtifactTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(name.encode())
                 path.chmod(0o755)
+            (root / "dav2d/build/src/libdav2d.so.0.p").mkdir()
             messages = root / "cargo.json"
             items = [{"reason": "build-script-executed"}]
             for name, executable in [("rav2d", "unit"), ("conformance", "conformance"), ("fuzz", "fuzz")]:

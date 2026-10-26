@@ -32,7 +32,8 @@ def pack(messages, target):
     library = ARTIFACTS / "lib"
     library.mkdir(exist_ok=True)
     for path in (ROOT / "dav2d/build/src").glob("libdav2d.so*"):
-        shutil.copy2(path, library / path.name)
+        if path.is_file():
+            shutil.copy2(path, library / path.name)
     assert list(library.iterdir()), "missing C oracle library"
     # Copy the build host's loader and libc.
     # Newer runner versions can require CPU features that older models lack.
