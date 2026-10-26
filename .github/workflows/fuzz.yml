@@ -116,7 +116,7 @@ jobs:
       # is forgotten. Open (or comment on) an issue so it stays visible until
       # the reproducer lands in tests/data/fuzz-regressions.
       - name: Report the crash in an issue
-        if: failure() && github.event_name != 'push'
+        if: failure() && github.ref != 'refs/heads/feat/av2-portability-conformance'
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}

@@ -221,13 +221,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools gdb
       - name: Build and run static production CLI
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: |
           nice -n 10 cargo build --locked --release -p rav2d-cli --target x86_64-unknown-linux-musl
           python3 tools/ci/smoke.py target/x86_64-unknown-linux-musl/release/rav2d
+      - name: Diagnose musl startup failures
+        if: failure()
+        run: |
+          file target/x86_64-unknown-linux-musl/release/rav2d
+          readelf -l target/x86_64-unknown-linux-musl/release/rav2d
+          nice -n 10 gdb -batch -ex run -ex bt -ex 'x/8i $pc' --args target/x86_64-unknown-linux-musl/release/rav2d crates/rav2d/tests/data/media/avm-v14.1.0-bus.64x64.l5.obu -t 1
 
   known-gaps:
     name: known decoder gap (${{ matrix.test }}, nonblocking)
