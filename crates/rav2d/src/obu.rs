@@ -1178,7 +1178,7 @@ pub fn parse_frame_hdr(
         }
         if hdr.allow_intrabc != 0 {
             hdr.max_bvp_drl_bits = if seqhdr.allow_max_bvp_drl_bits {
-                gb.get_ref_uniform(3, seqhdr.def_max_bvp_drl_bits as u32) as u8 + 1
+                gb.get_ref_uniform(3, seqhdr.def_max_bvp_drl_bits as u32 - 1) as u8 + 1
             } else {
                 seqhdr.def_max_bvp_drl_bits
             };
@@ -1186,7 +1186,7 @@ pub fn parse_frame_hdr(
 
         if hdr.is_inter_or_switch() {
             hdr.max_drl_bits = if seqhdr.allow_frame_max_drl_bits {
-                gb.get_ref_uniform(3, seqhdr.def_max_drl_bits as u32) as u8 + 1
+                gb.get_ref_uniform(5, seqhdr.def_max_drl_bits as u32 - 1) as u8 + 1
             } else {
                 seqhdr.def_max_drl_bits
             };
@@ -3520,6 +3520,76 @@ mod tests {
 
     fn default_refs() -> [RefState; crate::headers::NUM_REF_FRAMES] {
         std::array::from_fn(|_| RefState::default())
+    }
+
+    #[test]
+    fn frame_bvp_drl_uses_zero_based_default() {
+        for default in 1..=3 {
+            for limit in 1..=3 {
+                let seq = SequenceHeader {
+                    reduced_still_picture_header: true,
+                    max_width: 64,
+                    max_height: 64,
+                    df_par_bits: 1,
+                    screen_content_tools: AdaptiveBoolean::Adaptive,
+                    allow_max_bvp_drl_bits: true,
+                    def_max_bvp_drl_bits: default,
+                    ..Default::default()
+                };
+                // IDs 0, screen tools off, intrabc on, global on, local off.
+                let mut data = [0u8; 256];
+                let override_limit = limit != default;
+                data[0] = 0b11011000 | u8::from(override_limit) << 1;
+                if override_limit {
+                    data[0] |= limit - 1 - u8::from(limit > default);
+                }
+                let mut gb = GetBits::new(&data);
+                let hdr = parse_frame_hdr(
+                    &seq,
+                    &default_refs(),
+                    &Default::default(),
+                    ObuType::ClosedLoopKf,
+                    &mut gb,
+                )
+                .unwrap();
+                assert!(!gb.has_error());
+                assert_eq!(hdr.max_bvp_drl_bits, limit, "default={default}");
+            }
+        }
+    }
+
+    #[test]
+    fn frame_drl_uses_zero_based_default() {
+        for default in 1..=5 {
+            for limit in 1..=5 {
+                let seq = SequenceHeader {
+                    max_width: 64,
+                    max_height: 64,
+                    df_par_bits: 1,
+                    allow_frame_max_drl_bits: true,
+                    def_max_drl_bits: default,
+                    ..Default::default()
+                };
+                let mut data = [0u8; 256];
+                // IDs 0, show immediately, empty reference map, intrabc off.
+                let override_limit = limit != default;
+                data[0] = 0b11100000 | u8::from(override_limit);
+                if override_limit {
+                    data[1] = (limit - 1 - u8::from(limit > default)) << 6;
+                }
+                let mut gb = GetBits::new(&data);
+                let hdr = parse_frame_hdr(
+                    &seq,
+                    &default_refs(),
+                    &Default::default(),
+                    ObuType::Switch,
+                    &mut gb,
+                )
+                .unwrap();
+                assert!(!gb.has_error());
+                assert_eq!(hdr.max_drl_bits, limit, "default={default}");
+            }
+        }
     }
 
     #[test]
