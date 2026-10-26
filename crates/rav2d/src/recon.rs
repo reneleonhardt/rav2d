@@ -1322,6 +1322,10 @@ pub fn decode_coefs(
         }
     }
 
+    // The Walsh kernel requires a 4x4 transform, including on malformed input.
+    if *txtp as u8 == txtp::WHT_WHT && p.tx != 0 {
+        return i32::MIN;
+    }
     let tx_class = txtp::class(*txtp as u8);
 
     // secondary transform (IST)
